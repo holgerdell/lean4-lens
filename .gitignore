@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
-.venv/
+.venv*/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -10,3 +10,10 @@ dist/
 .lake/
 lake-manifest.json
 .tox/
+
+# Editor/LSP traces and the tools' own output
+LSP_*.log
+dead_candidates.jsonl
+module_build_times.jsonl
+review-cone*.html
+review-cone*.json

@@ -56,7 +56,7 @@ Subcommands:
                         --out-used / --out-unused also available as in `reach`.
 
 Common options (all subcommands):
-  --root=DIR            Project root (default: search from cwd).
+  --project=DIR         Lean project root (default: nearest lakefile from the CWD).
 
 Every subcommand exits 2 when the scan finds no project .lean files at all —
 a gate that scanned nothing must not pass as clean.
@@ -78,8 +78,8 @@ from typing import Any
 
 from . import symbols
 
-# Shared terminal palette. The `fmt_*` helpers return strings (printed by
-# `_dispatch`), so this module uses the colour functions and the
+# Shared terminal palette. The `fmt_*` helpers return strings (printed by the
+# `_cmd_*` handlers), so this module uses the colour functions and the
 # string-returning `kv_s` rather than cli's print-side helpers.
 from .cli import (
     bold,
@@ -91,13 +91,14 @@ from .cli import (
     write_jsonl,
     yellow,
 )
+from .cone_config import CONE_CONFIG_GLOB, roots_from_configs
 from .project import DEP_GRAPH_NAME, exit_no_lean_files, iter_lean_files, module_of, resolve_root_or_exit
-from .review_cone import CONE_CONFIG_GLOB, roots_from_configs
 from .source import blank_comments_and_strings
 
 # ---------------------------------------------------------------------------
 # Patterns and constants
 # ---------------------------------------------------------------------------
+
 
 def _kw(keyword: str) -> str:
     """Regex for one decl keyword; a two-word keyword (`class abbrev`) allows
@@ -497,6 +498,11 @@ def _build_rev(by_full: dict[str, Decl]) -> dict[str, list[str]]:
     return rev
 
 
+def by_file_line(d: Decl) -> tuple[str, int]:
+    """Source order: the sort key every listing of decls uses."""
+    return (d.file, d.line)
+
+
 def uncovered(g: Graph) -> tuple[list[Decl], list[Decl]]:
     """Decls the data does not vouch for, as ``(stale, uncompiled)`` sorted by
     file then line. *stale* — the module is described but the decl is not, so
@@ -504,7 +510,7 @@ def uncovered(g: Graph) -> tuple[list[Decl], list[Decl]]:
     root imports it, so there is nothing to regenerate. Only `stale` is a
     defect."""
     if g.cone is None:
-        return sorted(g.decls, key=lambda d: (d.file, d.line)), []
+        return sorted(g.decls, key=by_file_line), []
     known_modules = {module for _, module in g.cone}
     stale: list[Decl] = []
     uncompiled: list[Decl] = []
@@ -512,8 +518,7 @@ def uncovered(g: Graph) -> tuple[list[Decl], list[Decl]]:
         if d.refs_covered:
             continue
         (stale if module_of(d.file) in known_modules else uncompiled).append(d)
-    key = lambda d: (d.file, d.line)  # noqa: E731
-    return sorted(stale, key=key), sorted(uncompiled, key=key)
+    return sorted(stale, key=by_file_line), sorted(uncompiled, key=by_file_line)
 
 
 def build_graph(root: Path, graph_path: Path | None = None) -> Graph:
@@ -558,10 +563,9 @@ def used_split(g: Graph, roots: set[str]) -> tuple[list[Decl], list[Decl]]:
     used = _bfs(roots, lambda n: d.refs if (d := g.by_full.get(n)) else ())
     used.discard("sorry")  # virtual node, never a real decl
     real = [d for d in g.decls if d.full_name != "sorry"]
-    key = lambda d: (d.file, d.line)  # noqa: E731
     return (
-        sorted((d for d in real if d.full_name in used), key=key),
-        sorted((d for d in real if d.full_name not in used), key=key),
+        sorted((d for d in real if d.full_name in used), key=by_file_line),
+        sorted((d for d in real if d.full_name not in used), key=by_file_line),
     )
 
 
@@ -906,6 +910,17 @@ def reach_roots(g: Graph, names: list[str], root_files: list[str], root: Path) -
     return roots
 
 
+def _row(d: Decl) -> dict[str, Any]:
+    """The fields every JSONL row a command writes starts from."""
+    return {
+        "name": d.full_name,
+        "short_name": d.name,
+        "file": d.file,
+        "line": d.line,
+        "has_sorry": d.has_sorry,
+    }
+
+
 def fmt_reach(
     g: Graph,
     roots: set[str],
@@ -918,11 +933,7 @@ def fmt_reach(
 
     def rec(d: Decl) -> dict[str, Any]:
         return {
-            "name": d.full_name,
-            "short_name": d.name,
-            "file": d.file,
-            "line": d.line,
-            "has_sorry": d.has_sorry,
+            **_row(d),
             "sorry_tainted": d.tainted,
             "is_root": d.full_name in roots,
             "n_refs": len(d.refs),
@@ -1022,12 +1033,8 @@ def fmt_dead(
 
     def rec(d: Decl) -> dict[str, Any]:
         return {
-            "name": d.full_name,
-            "short_name": d.name,
-            "file": d.file,
-            "line": d.line,
+            **_row(d),
             "loc": d.loc,
-            "has_sorry": d.has_sorry,
             "implicit_reach": d.implicit_reach,
             "implicit_attr": d.implicit_attr,
             "implicit_kind": d.implicit_kind,
@@ -1099,7 +1106,9 @@ def resolve_or_die(query: str, g: Graph) -> str:
 
 def _make_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--root", type=Path, default=None)
+    common.add_argument(
+        "--project", type=Path, default=None, help="Lean project root (default: nearest lakefile from the CWD)."
+    )
 
     # The root/output arguments `reach` and `dead` share.
     roots_common = argparse.ArgumentParser(add_help=False)
@@ -1123,28 +1132,39 @@ def _make_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_sum = sub.add_parser("summary", parents=[common], help="Counts + listings.")
+    p_sum.set_defaults(handler=_cmd_summary)
     p_sum.add_argument("--fail-on-sorry", action="store_true", help="Exit 1 if any decl has a direct sorry.")
     p_sum.add_argument("--fail-on-axioms", action="store_true", help="Exit 1 if any decl is a stated axiom.")
     p_cov = sub.add_parser(
         "coverage", parents=[common], help=f"Check {DEP_GRAPH_NAME} covers every decl. Exits 1 if not."
     )
+    p_cov.set_defaults(handler=_cmd_coverage)
     p_cov.add_argument(
         "--list", action="store_true", help="Name the decls in never-imported files (default: count per file)."
     )
     p_from = sub.add_parser("from", parents=[common], help="Transitive deps as lean names.")
+    p_from.set_defaults(handler=_cmd_from)
     p_from.add_argument("name")
     p_direct = sub.add_parser("direct", parents=[common], help="Immediate refs.")
+    p_direct.set_defaults(handler=_cmd_direct)
     p_direct.add_argument("name")
     p_rdeps = sub.add_parser("rdeps", parents=[common], help="Transitive reverse-deps.")
+    p_rdeps.set_defaults(handler=_cmd_rdeps)
     p_rdeps.add_argument("name")
-    sub.add_parser("dag", parents=[common], help="Full DAG.")
+    sub.add_parser("dag", parents=[common], help="Full DAG.").set_defaults(handler=_cmd_dag)
     p_dot = sub.add_parser("dot", parents=[common], help="GraphViz DOT.")
+    p_dot.set_defaults(handler=_cmd_dot)
     p_dot.add_argument("name", nargs="?", default=None)
-    sub.add_parser("json", parents=[common], help="Full graph as JSON.")
-    sub.add_parser("reach", parents=[common, roots_common], help="Used/unused split from root decls/files.")
-    sub.add_parser("sorry-paths", parents=[common], help="Direct-sorry decls ranked by blast radius.")
-    sub.add_parser("orphans", parents=[common], help="Unreferenced decls.")
+    sub.add_parser("json", parents=[common], help="Full graph as JSON.").set_defaults(handler=_cmd_json)
+    sub.add_parser(
+        "reach", parents=[common, roots_common], help="Used/unused split from root decls/files."
+    ).set_defaults(handler=_cmd_reach)
+    sub.add_parser("sorry-paths", parents=[common], help="Direct-sorry decls ranked by blast radius.").set_defaults(
+        handler=_cmd_sorry_paths
+    )
+    sub.add_parser("orphans", parents=[common], help="Unreferenced decls.").set_defaults(handler=_cmd_orphans)
     p_dead = sub.add_parser("dead", parents=[common, roots_common], help="unused ∩ orphans — dead-code candidates.")
+    p_dead.set_defaults(handler=_cmd_dead)
     p_dead.add_argument(
         "--out",
         type=Path,
@@ -1178,72 +1198,112 @@ def _warn_duplicates(g: Graph) -> list[str]:
     return warnings
 
 
-def _dispatch(args: argparse.Namespace, g: Graph, root: Path) -> None:
-    cmd = args.cmd
+# Each subcommand is one handler returning its exit code; `_make_parser`
+# attaches the right one to its subparser, so the command names are enumerated
+# once rather than again in a dispatch cascade.
+Handler = Callable[[argparse.Namespace, Graph, Path], int]
 
-    if cmd == "summary":
-        print(fmt_summary(g))
-        # CI gates. Both facts are parse-time exact, so they hold even when
-        # the dependency data is missing or stale.
-        if args.fail_on_sorry and any(d.has_sorry for d in g.decls):
-            sys.exit(1)
-        if args.fail_on_axioms and any(d.is_axiom for d in g.decls):
-            sys.exit(1)
-    elif cmd == "coverage":
-        print(fmt_coverage(g, show_names=args.list))
-        # Non-zero on stale data so a pipeline can gate on it. Uncompiled
-        # modules are reported but do not fail: regenerating cannot fix them.
-        if g.cone is None or uncovered(g)[0]:
-            sys.exit(1)
-    elif cmd == "json":
-        print(fmt_json(g))
-    elif cmd == "reach":
-        roots = reach_roots(g, args.name, args.root_file, root)
-        if not roots:
-            print("reach: no roots resolved (pass NAME args and/or --root-file)", file=sys.stderr)
-            sys.exit(1)
-        print(fmt_reach(g, roots, args.out_used, args.out_unused))
-    elif cmd == "dag":
-        print(fmt_dag(g))
-    elif cmd == "orphans":
-        print(fmt_orphans(g))
-    elif cmd == "dead":
-        roots = reach_roots(g, args.name, args.root_file, root)
-        if not roots:
-            print("dead: no roots resolved (pass NAME args and/or --root-file)", file=sys.stderr)
-            sys.exit(1)
-        out = None if args.no_out else args.out
-        print(fmt_dead(g, roots, out, args.out_used, args.out_unused, closure=args.closure))
-    elif cmd == "sorry-paths":
-        print(fmt_sorry_paths(g))
-    elif cmd == "dot":
-        sub = resolve_or_die(args.name, g) if args.name else None
-        print(fmt_dot(g, subgraph=sub))
-    elif cmd == "from":
-        print(fmt_from(resolve_or_die(args.name, g), g))
-    elif cmd == "direct":
-        print(fmt_direct(resolve_or_die(args.name, g), g))
-    elif cmd == "rdeps":
-        print(fmt_rdeps(resolve_or_die(args.name, g), g))
-    else:
-        print(f"Unknown subcommand '{cmd}'", file=sys.stderr)
-        sys.exit(1)
+
+def _resolve_roots(args: argparse.Namespace, g: Graph, root: Path, cmd: str) -> set[str] | None:
+    """The root set `reach` and `dead` share, or None when none resolved —
+    an error, since reporting everything as unreachable would read as a clean
+    sweep."""
+    roots = reach_roots(g, args.name, args.root_file, root)
+    if not roots:
+        print(f"{cmd}: no roots resolved (pass NAME args and/or --root-file)", file=sys.stderr)
+        return None
+    return roots
+
+
+def _cmd_summary(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_summary(g))
+    # CI gates. Both facts are parse-time exact, so they hold even when
+    # the dependency data is missing or stale.
+    if args.fail_on_sorry and any(d.has_sorry for d in g.decls):
+        return 1
+    if args.fail_on_axioms and any(d.is_axiom for d in g.decls):
+        return 1
+    return 0
+
+
+def _cmd_coverage(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_coverage(g, show_names=args.list))
+    # Non-zero on stale data so a pipeline can gate on it. Uncompiled
+    # modules are reported but do not fail: regenerating cannot fix them.
+    return 1 if (g.cone is None or uncovered(g)[0]) else 0
+
+
+def _cmd_json(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_json(g))
+    return 0
+
+
+def _cmd_reach(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    roots = _resolve_roots(args, g, root, "reach")
+    if roots is None:
+        return 1
+    print(fmt_reach(g, roots, args.out_used, args.out_unused))
+    return 0
+
+
+def _cmd_dag(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_dag(g))
+    return 0
+
+
+def _cmd_orphans(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_orphans(g))
+    return 0
+
+
+def _cmd_dead(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    roots = _resolve_roots(args, g, root, "dead")
+    if roots is None:
+        return 1
+    out = None if args.no_out else args.out
+    print(fmt_dead(g, roots, out, args.out_used, args.out_unused, closure=args.closure))
+    return 0
+
+
+def _cmd_sorry_paths(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_sorry_paths(g))
+    return 0
+
+
+def _cmd_dot(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_dot(g, subgraph=resolve_or_die(args.name, g) if args.name else None))
+    return 0
+
+
+def _cmd_from(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_from(resolve_or_die(args.name, g), g))
+    return 0
+
+
+def _cmd_direct(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_direct(resolve_or_die(args.name, g), g))
+    return 0
+
+
+def _cmd_rdeps(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    print(fmt_rdeps(resolve_or_die(args.name, g), g))
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _make_parser()
     args = parser.parse_args(argv)
 
-    root = resolve_root_or_exit(args.root)
+    root = resolve_root_or_exit(args.project)
     g = build_graph(root)
     if not g.decls and next(iter_lean_files(root), None) is None:
         exit_no_lean_files(root)
 
-    _dispatch(args, g, root)
+    # Before the command runs: a handler may exit (a CI gate, an unresolvable
+    # name), and a warning that the graph itself is ambiguous must not be lost
+    # with it.
+    for w in _warn_duplicates(g):
+        print(dim(f"note: {w}"), file=sys.stderr)
 
-    warnings = _warn_duplicates(g)
-    if warnings:
-        print("", file=sys.stderr)
-        for w in warnings:
-            print(dim(f"note: {w}"), file=sys.stderr)
-    return 0
+    handler: Handler = args.handler
+    return handler(args, g, root)

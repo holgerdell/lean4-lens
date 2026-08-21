@@ -48,21 +48,21 @@ import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 from . import cli
+from .cone_config import DEFAULT_CONFIG_NAME, ReviewConeConfig, load_config
 from .project import (
     DEP_GRAPH_NAME,
     RootNotFoundError,
-    find_root,
     module_path,
     read_lib_names,
     read_package_name,
+    resolve_root,
     resolve_root_or_exit,
 )
 from .source import blank_comments_and_strings, iter_spans
@@ -71,148 +71,54 @@ from .source import blank_comments_and_strings, iter_spans
 # `lake env lean --run`.
 REVIEW_CONE_LEAN = Path(__file__).resolve().parent / "data" / "review_cone.lean"
 
-# One cone entry (project or mathlib decl), JSON-decoded from review_cone.lean's output.
-Decl = dict[str, Any]
+
+@dataclass
+class ConeDecl:
+    """One project declaration in the cone, as review_cone.lean emitted it,
+    plus the source snippet the renderer reads for it."""
+
+    name: str
+    module: str
+    kind: str
+    start_line: int
+    end_line: int
+    status: str
+    axioms: list[str]
+    refs: list[str]
+    is_root: bool
+    # None marks JSON written before the emitter reported `autoName`; the
+    # renderer then falls back to Lean's `inst` naming convention.
+    auto_name: bool | None
+    snippet: str = ""
+    truncated: bool = False
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> ConeDecl:
+        return cls(
+            name=d["name"],
+            module=d.get("module", ""),
+            kind=d.get("kind", ""),
+            start_line=d.get("startLine", 0),
+            end_line=d.get("endLine", 0),
+            status=d.get("status", ""),
+            axioms=d.get("axioms", []),
+            refs=d.get("refs", []),
+            is_root=d.get("isRoot", False),
+            auto_name=d.get("autoName"),
+        )
+
+
+@dataclass(frozen=True)
+class MathlibDecl:
+    """One mathlib/core reference in the cone: a name and its docs URL."""
+
+    name: str
+    url: str
 
 
 # --------------------------------------------------------------------------- #
-# Project discovery + config + the driver                                     #
+# The driver                                                                  #
 # --------------------------------------------------------------------------- #
-def find_project_root(start: Path | None) -> Path | None:
-    """The project root for `start`, or None when there is no lakefile to find."""
-    try:
-        return find_root(start)
-    except RootNotFoundError:
-        return None
-
-
-DEFAULT_CONFIG_NAME = "review-cone.toml"
-
-# A project may keep several configs, one per review document.
-CONE_CONFIG_GLOB = "review-cone*.toml"
-
-
-class SectionConfig(TypedDict):
-    title: str
-    decls: list[str]
-    titles: dict[str, str]
-
-
-class SupportConfig(TypedDict):
-    title: str
-    toc: bool
-
-
-class ReviewConeConfig(TypedDict):
-    sections: list[SectionConfig]
-    support: SupportConfig
-    roots: list[str]
-    title: str | None
-    out: str | None
-
-
-class ConfigError(SystemExit):
-    """A malformed review-cone.toml — reported with the cli.red convention."""
-
-    def __init__(self, msg: str) -> None:
-        super().__init__(cli.red("✗ review-cone.toml: ") + msg)
-
-
-def load_config(path: Path) -> ReviewConeConfig:
-    """Parse and validate `review-cone.toml`. Returns
-        {"sections": [{"title": str, "decls": [name], "titles": {name: str}}],
-         "support": {"title": str, "toc": bool},
-         "roots": [name],          # union of all section decls, order-preserving
-         "title": str | None,      # document title (CLI --title overrides)
-         "out": str | None}        # output path, relative to the project root
-    Every named decl is a root. Enforced invariants (each a hard error):
-      * each `[[section]]` has a non-empty string `title` and a `decls` list of
-        strings;
-      * no decl appears in two sections;
-      * every `[section.titles]` key is one of that section's decls, with a
-        string value (a value that parsed to a dict means an *unquoted* dotted
-        key — Lean names contain dots — which TOML silently nests)."""
-    if not path.is_file():
-        raise ConfigError(f"not found at {path} (pass --config to point elsewhere)")
-    try:
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"parse error — {e}") from e
-
-    raw_sections = raw.get("section")
-    if not isinstance(raw_sections, list) or not raw_sections:
-        raise ConfigError("needs at least one [[section]] with a `decls` list")
-
-    sections: list[SectionConfig] = []
-    seen: dict[str, str] = {}  # decl name -> section title that claimed it
-    roots: list[str] = []
-    for i, sec in enumerate(raw_sections):
-        if not isinstance(sec, dict):
-            raise ConfigError(f"section #{i + 1} must be a [[section]] table")
-        title = sec.get("title")
-        if not isinstance(title, str) or not title.strip():
-            raise ConfigError(f"section #{i + 1} needs a non-empty string `title`")
-        raw_decls = sec.get("decls", [])
-        if not isinstance(raw_decls, list) or not all(isinstance(d, str) for d in raw_decls):
-            raise ConfigError(f"section '{title}': `decls` must be a list of strings")
-        decls: list[str] = [d for d in raw_decls if isinstance(d, str)]
-        for d in decls:
-            if d in seen:
-                raise ConfigError(f"decl '{d}' is listed in both '{seen[d]}' and '{title}'")
-            seen[d] = title
-            roots.append(d)
-        raw_titles = sec.get("titles", {})
-        if not isinstance(raw_titles, dict):
-            raise ConfigError(f"section '{title}': `[section.titles]` must be a table")
-        titles: dict[str, str] = {}
-        for k, v in raw_titles.items():
-            if not isinstance(k, str):
-                continue  # TOML keys are always strings; this only narrows for the type checker
-            if not isinstance(v, str):
-                raise ConfigError(
-                    f"section '{title}': title for '{k}' is not a string — "
-                    'a dotted Lean name must be quoted ("CountColorings.branch")'
-                )
-            if k not in decls:
-                raise ConfigError(f"section '{title}': title for '{k}', which is not one of its decls")
-            titles[k] = v
-        sections.append({"title": title, "decls": decls, "titles": titles})
-
-    sup = raw.get("support", {})
-    if not isinstance(sup, dict):
-        raise ConfigError("`[support]` must be a table")
-    support: SupportConfig = {
-        "title": sup.get("title", "Supporting declarations"),
-        "toc": bool(sup.get("toc", False)),
-    }
-    if not isinstance(support["title"], str) or not support["title"].strip():
-        raise ConfigError("`support.title` must be a non-empty string")
-    doc_title = raw.get("title")
-    if doc_title is not None and not isinstance(doc_title, str):
-        raise ConfigError("`title` must be a string")
-    out = raw.get("out")
-    if out is not None and not isinstance(out, str):
-        raise ConfigError("`out` must be a string path")
-    return {"sections": sections, "support": support, "roots": roots, "title": doc_title, "out": out}
-
-
-def roots_from_configs(root: Path) -> set[str]:
-    """Root decl names from every `review-cone*.toml` in `root` — the union of
-    each config's roots, via the one authoritative parser. Empty (with a note)
-    if none is found; an invalid config is skipped with a note."""
-    paths = sorted(root.glob(CONE_CONFIG_GLOB))
-    if not paths:
-        print(f"note: no {CONE_CONFIG_GLOB} in {root}", file=sys.stderr)
-        return set()
-    out: set[str] = set()
-    for path in paths:
-        try:
-            out.update(load_config(path)["roots"])
-        except ConfigError as e:
-            print(f"note: {path.name} skipped — {e.code}", file=sys.stderr)
-    return out
-
-
 def elide_middle(s: str, head: int = 3000, tail: int = 1200) -> str:
     """Shorten `s` from the middle. A crash names its cause at the top of the
     backtrace and only reaches the thread entry point at the bottom, so clipping
@@ -317,12 +223,12 @@ def anchor_id(name: str) -> str:
     return "d-" + "".join(ch if (ch.isascii() and ch.isalnum()) else f"_{ord(ch)}" for ch in name)
 
 
-def status_badge(d: Decl) -> str:
-    st = d.get("status", "")
+def status_badge(d: ConeDecl) -> str:
+    st = d.status
     if st == "verified":
         return "<span class='badge verified' title='sorry-free; standard axioms only'>✓ Verified</span>"
     if st == "tainted":
-        ax = ", ".join(d.get("axioms", []))
+        ax = ", ".join(d.axioms)
         return (
             f"<span class='badge tainted' title='sorry-free but depends on extra axioms'>"
             f"⚠ Tainted</span><span class='axioms'>{html.escape(ax)}</span>"
@@ -332,15 +238,15 @@ def status_badge(d: Decl) -> str:
     return ""
 
 
-def render_decl(d: Decl, body_html: str, title: str = "") -> str:
+def render_decl(d: ConeDecl, body_html: str, title: str = "") -> str:
     """One declaration's entry — every decl renders through this, in whatever
     section it lands: `<kind> <name> (optional title) [badge]`, then the source
     body. The optional display title comes from the config's `[section.titles]`."""
-    name = d["name"]
+    name = d.name
     title_html = f" <span class='title'>({html.escape(title)})</span>" if title else ""
     return (
         f"<div class='entry'><h3 id='{anchor_id(name)}'>"
-        f"<span class='head'>{html.escape(d['kind'])}</span> "
+        f"<span class='head'>{html.escape(d.kind)}</span> "
         f"<strong class='self'>{html.escape(name)}</strong>"
         f"{title_html} {status_badge(d)}</h3>"
         f"{body_html}</div>"
@@ -374,12 +280,12 @@ def _statement_value_split(block: list[str]) -> tuple[int, int] | None:
 
 def read_snippet(
     lean_root: Path,
-    d: Decl,
+    d: ConeDecl,
     max_lines: int = 60,
     cache: dict[str, list[str]] | None = None,
 ) -> tuple[str, bool]:
-    module, name = d["module"], d["name"]
-    start, end = d["startLine"], d["endLine"]
+    module, name = d.module, d.name
+    start, end = d.start_line, d.end_line
     if start <= 0:
         return "", False
     lines = cache.get(module) if cache is not None else None
@@ -406,7 +312,7 @@ def read_snippet(
     # genuinely their declaration site, they are just never spelled out under
     # the name Lean chose for them, so the text can never match.
     last = name.split(".")[-1] if name else ""
-    auto_name = d.get("autoName")
+    auto_name = d.auto_name
     if auto_name is None:
         # pre-autoName JSON: guess by Lean's `mkInstanceName` prefix convention
         auto_name = last.startswith("inst")
@@ -419,7 +325,7 @@ def read_snippet(
     # That `:=` is the one at bracket depth 0: a `:=` inside binders (autoparams
     # `(h : P := by …)`), a set-builder `{u | let x := …}`, or a comment/string
     # belongs to the statement, not the proof, and must not truncate it.
-    if d["kind"] == "theorem":
+    if d.kind == "theorem":
         cut = _statement_value_split(block)
         if cut is not None:
             c_idx, c_col = cut
@@ -452,8 +358,8 @@ class Indexes:
     # A None value marks a structure-field projection: it resolves, but its
     # link target is the parent structure (see `proj_target`), and it has no
     # cone entry of its own.
-    proj_full: dict[str, Decl | None]
-    mlib_full: dict[str, Decl]
+    proj_full: dict[str, ConeDecl | None]
+    mlib_full: dict[str, MathlibDecl]
     proj_final: dict[str, str]  # globally-unique final component -> full name
     mlib_final: dict[str, str]
     proj_target: dict[str, str]  # full name -> anchor target (fields -> struct)
@@ -471,15 +377,15 @@ class LinkCtx:
     local_qual_final: dict[str, str]
 
 
-def build_indexes(project: list[Decl], mathlib: list[Decl], field_of: dict[str, str]) -> Indexes:
-    proj_full: dict[str, Decl | None] = {d["name"]: d for d in project}
+def build_indexes(project: list[ConeDecl], mathlib: list[MathlibDecl], field_of: dict[str, str]) -> Indexes:
+    proj_full: dict[str, ConeDecl | None] = {d.name: d for d in project}
     # structure-field projections resolve too, but their link target is the
     # parent structure (they are not emitted as their own entries).
-    proj_target: dict[str, str] = {d["name"]: d["name"] for d in project}
+    proj_target: dict[str, str] = {d.name: d.name for d in project}
     for fld, struct in field_of.items():
         proj_full.setdefault(fld, None)
         proj_target[fld] = struct
-    mlib_full: dict[str, Decl] = {d["name"]: d for d in mathlib}
+    mlib_full: dict[str, MathlibDecl] = {d.name: d for d in mathlib}
 
     def unique_final(names: list[str]) -> dict[str, str]:
         cnt = Counter(n.split(".")[-1] for n in names)
@@ -509,7 +415,7 @@ def linkify_chunk(chunk: str, ctx: LinkCtx) -> str:
         return f'<a class="proj" href="#{anchor_id(target)}">{html.escape(text)}</a>'
 
     def mlib_link(full: str, text: str) -> str:
-        url = mlib_full[full]["url"]
+        url = mlib_full[full].url
         return f'<a class="mlib" href="{html.escape(url)}" target="_blank">{html.escape(text)}</a>'
 
     def resolve_final(seg: str, dotted: bool = False) -> tuple[str, str] | None:
@@ -686,8 +592,8 @@ def render(
     config: ReviewConeConfig,
     show_support_toc: bool,
 ) -> str:
-    project = data["project"]
-    mathlib = sorted(data["mathlib"], key=lambda d: d["name"].lower())
+    project = [ConeDecl.from_json(d) for d in data["project"]]
+    mathlib = sorted((MathlibDecl(d["name"], d.get("url", "")) for d in data["mathlib"]), key=lambda d: d.name.lower())
     field_of = data.get("fieldOf", {})
     idx = build_indexes(project, mathlib, field_of)
     proj_full, proj_target = idx.proj_full, idx.proj_target
@@ -701,22 +607,22 @@ def render(
     # Read each decl's source once; the cache reads each *module* once.
     module_lines: dict[str, list[str]] = {}
     for d in project:
-        d["snippet"], d["trunc"] = read_snippet(lean_root, d, cache=module_lines)
+        d.snippet, d.truncated = read_snippet(lean_root, d, cache=module_lines)
 
     # Reverse dependency map: for each project decl, who in the cone uses it.
     # A ref to a structure field counts as a use of the parent struct
     # (proj_target normalizes fields -> struct, same as the linkifier).
     used_by: dict[str, set[str]] = {}
     for d in project:
-        dname = d["name"]
-        for r in d.get("refs", []):
+        dname = d.name
+        for r in d.refs:
             target = proj_target.get(r)
             if target is None or target == dname:
                 continue
             used_by.setdefault(target, set()).add(dname)
 
-    def used_by_html(d: Decl) -> str:
-        users = used_by.get(d["name"])
+    def used_by_html(d: ConeDecl) -> str:
+        users = used_by.get(d.name)
         if not users:
             return ""
         items = ", ".join(
@@ -725,16 +631,16 @@ def render(
         return f"<div class='usedby'><span class='usedby-label'>Used by:</span> {items}</div>"
 
     # --- Reading order: topological build-up (dependencies first) -------------
-    def dep_edges(d: Decl) -> list[str]:
-        return [r for r in d.get("refs", []) if r in proj_full and r != d["name"]]
+    def dep_edges(d: ConeDecl) -> list[str]:
+        return [r for r in d.refs if r in proj_full and r != d.name]
 
-    def topo_sort(decls: list[Decl], key: Callable[[Decl], str]) -> list[Decl]:
+    def topo_sort(decls: list[ConeDecl], key: Callable[[ConeDecl], str]) -> list[ConeDecl]:
         """Dependencies-first order within `decls`; `key` breaks ties. A cycle
         (should not occur) degrades to emitting all of `decls` sorted by `key`."""
-        pool = {d["name"]: d for d in decls}
+        pool = {d.name: d for d in decls}
         # Equal keys fall back to the caller's `decls` order (a stable sort
         # would do the same), so the heap carries the position, not the name.
-        pos = {d["name"]: i for i, d in enumerate(decls)}
+        pos = {d.name: i for i, d in enumerate(decls)}
         sorter: graphlib.TopologicalSorter[str] = graphlib.TopologicalSorter()
         for nm, d in pool.items():
             sorter.add(nm, *(r for r in dep_edges(d) if r in pool))
@@ -744,7 +650,7 @@ def render(
             return sorted(decls, key=key)
         heap = [(key(pool[nm]), pos[nm], nm) for nm in sorter.get_ready()]
         heapq.heapify(heap)
-        out: list[Decl] = []
+        out: list[ConeDecl] = []
         while heap:
             _, _, nm = heapq.heappop(heap)
             out.append(pool[nm])
@@ -759,29 +665,29 @@ def render(
     # and skipped. Every unplaced cone member falls into the support catch-all,
     # topologically sorted (dependencies first, so it reads with no forward refs).
     placed: set[str] = set()
-    section_entries: list[tuple[str, list[Decl]]] = []
+    section_entries: list[tuple[str, list[ConeDecl]]] = []
     for sec in config["sections"]:
-        entries: list[Decl] = []
+        entries: list[ConeDecl] = []
         for name in sec["decls"]:
             # `proj_full` holds None for a field redirected to its parent
             # structure — no cone entry of its own, same as a missing name.
-            d = proj_full.get(name)
-            if d is None:
+            entry = proj_full.get(name)
+            if entry is None:
                 msg = f"warning: config root {name!r} has no cone entry (redirected to a parent?); skipped in layout"
                 print(cli.yellow(msg), file=sys.stderr)
                 continue
             if name not in placed:
                 placed.add(name)
-                entries.append(d)
+                entries.append(entry)
         section_entries.append((sec["title"], entries))
-    support = topo_sort([d for d in project if d["name"] not in placed], key=lambda d: d["name"].lower())
+    support = topo_sort([d for d in project if d.name not in placed], key=lambda d: d.name.lower())
     support_title = config["support"]["title"]
 
-    def _body(d: Decl) -> str:
-        name = d["name"]
+    def _body(d: ConeDecl) -> str:
+        name = d.name
         local_by_final: dict[str, set[str]] = {}
         local_by_qfinal: dict[str, set[str]] = {}
-        for r in d.get("refs", []):
+        for r in d.refs:
             if r in proj_full or r in idx.mlib_full:
                 local_by_final.setdefault(r.split(".")[-1], set()).add(r)
                 if "." in r:  # qualified refs only, for dot-notation access
@@ -793,17 +699,17 @@ def render(
             local_final={f: next(iter(s)) for f, s in local_by_final.items() if len(s) == 1},
             local_qual_final={f: next(iter(s)) for f, s in local_by_qfinal.items() if len(s) == 1},
         )
-        snippet = d["snippet"]
+        snippet = d.snippet
         body = linkify(snippet, ctx) if snippet else "<span class='trunc'>(source not found)</span>"
-        tag = " <span class='trunc'>… (truncated)</span>" if d["trunc"] else ""
-        file_disp = module_path(d["module"]).as_posix()
+        tag = " <span class='trunc'>… (truncated)</span>" if d.truncated else ""
+        file_disp = module_path(d.module).as_posix()
         meta = (
             f"<span class='code-meta'><span class='code-file'>{html.escape(file_disp)}</span>"
-            f" · {d['startLine']}–{d['endLine']}</span>"
+            f" · {d.start_line}–{d.end_line}</span>"
         )
         return f"<div class='codeblock'><pre>{body}{tag}</pre>{meta}</div>"
 
-    st_counts = Counter(d.get("status", "") for d in project)
+    st_counts = Counter(d.status for d in project)
     n_total = len(project)
     n_verified = st_counts.get("verified", 0)
     n_tainted = st_counts.get("tainted", 0)
@@ -849,9 +755,9 @@ def render(
             f"<div class='vpanel-foot'>{footer}</div></div></section>"
         )
 
-    def toc_label(d: Decl) -> str:
-        t = title_map.get(d["name"])
-        return html.escape(t) if t else html.escape(d["name"])
+    def toc_label(d: ConeDecl) -> str:
+        t = title_map.get(d.name)
+        return html.escape(t) if t else html.escape(d.name)
 
     ptitle = title_override or (f"the {package}" if package else "this Lean project")
     title = "Review cone — " + ptitle
@@ -897,11 +803,11 @@ def render(
             continue
         parts.append(f"<div class='tocgroup'>{html.escape(sec_title)} ({len(entries)})</div>")
         for d in entries:
-            parts.append(f"<a href='#{anchor_id(d['name'])}'>{toc_label(d)}</a><br>")
+            parts.append(f"<a href='#{anchor_id(d.name)}'>{toc_label(d)}</a><br>")
     if support and show_support_toc:
         parts.append(f"<div class='tocgroup'>{html.escape(support_title)} ({len(support)})</div>")
         for d in support:
-            parts.append(f"<a href='#{anchor_id(d['name'])}'>{html.escape(d['name'])}</a><br>")
+            parts.append(f"<a href='#{anchor_id(d.name)}'>{html.escape(d.name)}</a><br>")
     parts.append("</div>")
 
     for sec_title, entries in section_entries:
@@ -909,7 +815,7 @@ def render(
             continue
         parts.append(f"<h2>{html.escape(sec_title)}</h2>")
         for d in entries:
-            parts.append(render_decl(d, _body(d) + used_by_html(d), title_map.get(d["name"], "")))
+            parts.append(render_decl(d, _body(d) + used_by_html(d), title_map.get(d.name, "")))
     if support:
         parts.append(f"<h2>{html.escape(support_title)}</h2>")
         for d in support:
@@ -960,7 +866,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the default config/output locations) — even in --json render-only mode, so a
     # `review-cone.toml` in the project is still auto-detected.
     start = (args.project or Path.cwd()).resolve()
-    project_root = find_project_root(args.project)
+    try:
+        project_root: Path | None = resolve_root(args.project)
+    except RootNotFoundError:
+        project_root = None
     if project_root is None and args.json is None:
         print(
             cli.red("✗ no lakefile.lean/.toml found") + cli.dim(f"  from {start} upward — pass --project"),
@@ -1008,16 +917,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
 
-    # Resolve the source root for snippets: --lean-root, else the JSON's own
-    # projectRoot, else the discovered project root.
+    # Resolve the source root for snippets: --lean-root, else the project we
+    # found, else the JSON's own `projectRoot` — which the emitter records
+    # relative to the project root, so it resolves against the JSON's directory.
     if args.lean_root is not None:
         lean_root = args.lean_root
-    elif data.get("projectRoot"):
-        lean_root = Path(data["projectRoot"])
     elif project_root is not None:
         lean_root = project_root
     else:
-        lean_root = json_path.resolve().parent
+        lean_root = (json_path.resolve().parent / data.get("projectRoot", ".")).resolve()
 
     package = read_package_name(project_root) if project_root is not None else None
     show_support_toc = config["support"]["toc"] or args.toc_support

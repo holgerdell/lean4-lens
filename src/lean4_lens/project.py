@@ -68,7 +68,9 @@ def find_root(start: Path | None = None) -> Path:
 
 
 def resolve_root(start: Path | None) -> Path:
-    """`find_root`, except an explicitly named directory must exist."""
+    """`find_root`, except an explicitly named directory must exist — so a
+    typo in `--project` is reported rather than silently resolved to some
+    ancestor project."""
     if start is not None and not start.exists():
         raise RootNotFoundError(f"root directory not found: {start}")
     return find_root(start)

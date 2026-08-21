@@ -2,14 +2,14 @@
 `review_cone.lean` — emit exact, elaborator-derived declaration data as JSON.
 
 It serves two readers, and `REVIEW_CONE_DEPS` chooses between them: the review
-document `render_review_cone.py` renders, and the dependency graph `dep_tree.py`
-answers from. What each reader needs, and why neither answer suits the other,
+document `lean4-lens review-cone` renders, and the dependency graph
+`lean4-lens dep-tree` answers from. What each reader needs, and why neither answer suits the other,
 is set out in the environment variables below.
 
 Project-independent by construction:
 
-  * roots are supplied by name in `REVIEW_CONE_ROOTS` — render_review_cone.py
-    sets it from the project's `review-cone.toml` (every decl named anywhere in
+  * roots are supplied by name in `REVIEW_CONE_ROOTS` — `review-cone` sets it
+    from the project's `review-cone.toml` (every decl named anywhere in
     that config is a root) — no in-source attribute, no hardcoded allowlist, no
     paper cross-reference file;
   * the project's libraries are discovered from its `lakefile` and imported
@@ -21,9 +21,9 @@ Project-independent by construction:
     in with one spelling that works across the whole range;
   * configuration is read from the environment:
       REVIEW_CONE_LIBS      comma-separated `lean_lib` names to scan (REQUIRED;
-                            render_review_cone.py sets it from the lakefile)
+                            `review-cone` sets it from the lakefile)
       REVIEW_CONE_ROOTS     comma-separated fully-qualified root decl names
-                            (REQUIRED in cone mode; render_review_cone.py sets it
+                            (REQUIRED in cone mode; `review-cone` sets it
                             from review-cone.toml). Every name must resolve to a
                             project declaration or the run fails. Ignored in
                             dependency mode, which has no roots.
@@ -42,7 +42,7 @@ Run it from the project root once the project is built:
 
     lake env lean --run <this file>
 
-`render_review_cone.py` orchestrates that (build → run → render) for you.
+`lean4-lens review-cone` orchestrates that (build → run → render) for you.
 -/
 import Lean
 
@@ -336,7 +336,10 @@ def emitJson (prefixes : Array Name) (projectRoot : String) (roots : Array Name)
   let mlibSorted := mlib.qsort (fun a b => a.toString < b.toString)
 
   let mut out := "{\n"
-  out := out ++ s!"  \"projectRoot\": \"{jsonEsc projectRoot}\",\n"
+  -- Recorded relative to the project root, never as this machine's absolute
+  -- path: the JSON is committed, and an absolute path would dirty it for
+  -- everyone else. Readers resolve it against the file's own directory.
+  out := out ++ "  \"projectRoot\": \".\",\n"
   out := out ++ s!"  \"roots\": {roots.size},\n"
   -- the list `axiomInfo` classified with, so renderers never restate their own
   let stdStr := String.intercalate ", "
@@ -564,7 +567,7 @@ unsafe def run : IO Unit := do
     | throw <| IO.userError "review_cone: no lakefile.lean/.toml found from the current directory"
   -- libraries to scan (comma-separated lean_lib names; the driver sets this)
   let some libsStr ← IO.getEnv "REVIEW_CONE_LIBS"
-    | throw <| IO.userError "review_cone: set REVIEW_CONE_LIBS (comma-separated lean_lib names); render_review_cone.py sets it automatically"
+    | throw <| IO.userError "review_cone: set REVIEW_CONE_LIBS (comma-separated lean_lib names); `lean4-lens review-cone` sets it automatically"
   let libs := splitComma libsStr
   if libs.isEmpty then
     throw <| IO.userError "review_cone: REVIEW_CONE_LIBS is empty"
@@ -574,7 +577,7 @@ unsafe def run : IO Unit := do
   -- from review-cone.toml — every decl named in the config is a root)
   let rootNames ← if depMode then pure #[] else do
     let some rootsStr ← IO.getEnv "REVIEW_CONE_ROOTS"
-      | throw <| IO.userError "review_cone: set REVIEW_CONE_ROOTS (comma-separated root decl names); render_review_cone.py sets it from review-cone.toml"
+      | throw <| IO.userError "review_cone: set REVIEW_CONE_ROOTS (comma-separated root decl names); `lean4-lens review-cone` sets it from review-cone.toml"
     let names := (splitComma rootsStr).map (String.toName ·) |>.toArray
     if names.isEmpty then
       throw <| IO.userError "review_cone: REVIEW_CONE_ROOTS is empty — the config named no declarations"

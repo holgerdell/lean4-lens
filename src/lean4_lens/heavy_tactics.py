@@ -22,6 +22,7 @@ import argparse
 import re
 import sys
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from .cli import (
@@ -76,7 +77,13 @@ def _pat(words: Iterable[str]) -> re.Pattern[str]:
 ALL_TACTICS_RE = _pat(name for name, _ in TACTICS)
 
 
-Hit = tuple[Path, int, str]  # file, 1-indexed line, original line text
+@dataclass(frozen=True)
+class Hit:
+    """One tactic use: where it is, and the source line as written."""
+
+    path: Path
+    line: int  # 1-indexed
+    text: str
 
 
 def scan(root: Path, only: str | None = None) -> tuple[dict[str, list[Hit]], int]:
@@ -95,7 +102,7 @@ def scan(root: Path, only: str | None = None) -> tuple[dict[str, list[Hit]], int
         clean = blank_comments_and_strings(text).split("\n")
         for lineno, code in enumerate(clean, start=1):
             for name in {m.group(1) for m in rx.finditer(code)}:
-                hits[name].append((path, lineno, orig[lineno - 1]))
+                hits[name].append(Hit(path, lineno, orig[lineno - 1]))
     return hits, n_files
 
 
@@ -121,8 +128,8 @@ def show_summary(hits: dict[str, list[Hit]], root: Path, n_files: int, show_omit
     table_header(_COLS, caption="most-used first · run `… <tactic>` for line hits")
     for name in present:
         hl = hits[name]
-        files = {h[0] for h in hl}
-        top = max(files, key=lambda f: sum(1 for h in hl if h[0] == f))
+        files = {h.path for h in hl}
+        top = max(files, key=lambda f: sum(1 for h in hl if h.path == f))
         top_rel = _trunc(str(top.relative_to(root)), 34)
         row(
             (
@@ -147,15 +154,15 @@ def show_summary(hits: dict[str, list[Hit]], root: Path, n_files: int, show_omit
 
 
 def show_detail(hits: dict[str, list[Hit]], name: str, root: Path) -> None:
-    hl = sorted(hits[name], key=lambda h: (str(h[0]), h[1]))
+    hl = sorted(hits[name], key=lambda h: (str(h.path), h.line))
     rx = _pat([name])
     print()
     print("  " + bold(cyan(f"Heavy tactics · {name}")))
-    print("  " + dim(f"{len(hl)} hit(s) in {len({h[0] for h in hl})} file(s)"))
+    print("  " + dim(f"{len(hl)} hit(s) in {len({h.path for h in hl})} file(s)"))
     print(rule())
-    for path, lineno, code in hl:
-        loc = f"{path.relative_to(root)}:{lineno}"
-        marked = rx.sub(lambda m: yellow(bold(m.group(0))), code.strip())
+    for hit in hl:
+        loc = f"{hit.path.relative_to(root)}:{hit.line}"
+        marked = rx.sub(lambda m: yellow(bold(m.group(0))), hit.text.strip())
         print(f"  {dim(loc)}  {marked}")
     print(rule())
     kv("total", bold(green(str(len(hl)))))
@@ -171,7 +178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("tactic", nargs="?", help="show every hit (file:line + code) for this tactic")
     ap.add_argument("--all", action="store_true", help="include decide/norm_num/omega in the summary table")
     ap.add_argument(
-        "--root", type=Path, default=None, help="project root to scan (default: nearest lakefile from the CWD)"
+        "--project", type=Path, default=None, help="Lean project root to scan (default: nearest lakefile from the CWD)"
     )
     args = ap.parse_args(argv)
 
@@ -180,7 +187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"unknown tactic {args.tactic!r}; known: {', '.join(known)}", file=sys.stderr)
         return 2
 
-    root = resolve_root_or_exit(args.root)
+    root = resolve_root_or_exit(args.project)
     hits, n_files = scan(root, only=args.tactic)
     clear_transient()
     if n_files == 0:

@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -34,6 +35,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
+from lean4_lens import build_times as B
+from lean4_lens import cone_config as C
 from lean4_lens import dep_tree as D
 from lean4_lens import heavy_tactics as H
 from lean4_lens import project as P
@@ -226,9 +229,7 @@ def test_guillemet_namespace_is_tracked() -> None:
     # 21d. `namespace «Prop» … end «Prop»` (mathlib Order/Atoms.lean): the
     # name must qualify decls, and its `end` must not read as a *bare* end —
     # that would silently close the enclosing anonymous section instead.
-    src = (
-        "section\nnamespace «Prop»\ndef isAtom_iff : Nat := 0\nend «Prop»\nend\ndef tail : Nat := 0\n"
-    )
+    src = "section\nnamespace «Prop»\ndef isAtom_iff : Nat := 0\nend «Prop»\nend\ndef tail : Nat := 0\n"
     assert _names_in(src) == {"«Prop».isAtom_iff", "tail"}
 
 
@@ -723,10 +724,7 @@ def test_k8b_review_cone_is_not_the_dep_graph(tmp_path: Path) -> None:
 _BINDER_TREE: dict[str, str] = {
     "Core.lean": "namespace Pkg\nstructure Spin where\n  q : Nat\nend Pkg\n",
     "Rules.lean": (
-        "namespace Pkg\n"
-        "def removeDead (s : Spin) : Spin :=\n  s\n"
-        "def foldBare (s : Spin) : Spin :=\n  s\n"
-        "end Pkg\n"
+        "namespace Pkg\ndef removeDead (s : Spin) : Spin :=\n  s\ndef foldBare (s : Spin) : Spin :=\n  s\nend Pkg\n"
     ),
     "Step.lean": "namespace Pkg\ndef reduceStep (S : Spin) : Spin :=\n  S.removeDead.foldBare\nend Pkg\n",
     "Other.lean": "namespace Other\ndef S : Nat :=\n  0\nend Other\n",
@@ -953,26 +951,22 @@ def test_help_runs() -> None:
 
 def test_summary_fail_on_sorry_exits_1(tmp_path: Path) -> None:
     root = _write_lean_tree(tmp_path, {"A.lean": "namespace P\ntheorem t : True :=\n  sorry\nend P\n"})
-    with pytest.raises(SystemExit) as e:
-        D.main(["summary", "--root", str(root), "--fail-on-sorry"])
-    assert e.value.code == 1
+    assert D.main(["summary", "--project", str(root), "--fail-on-sorry"]) == 1
 
 
 def test_summary_fail_on_axioms_exits_1(tmp_path: Path) -> None:
     root = _write_lean_tree(tmp_path, {"A.lean": "namespace P\naxiom a : True\nend P\n"})
-    with pytest.raises(SystemExit) as e:
-        D.main(["summary", "--root", str(root), "--fail-on-axioms"])
-    assert e.value.code == 1
+    assert D.main(["summary", "--project", str(root), "--fail-on-axioms"]) == 1
 
 
 def test_summary_gates_pass_on_a_clean_tree(tmp_path: Path) -> None:
     root = _write_lean_tree(tmp_path, {"A.lean": "namespace P\ntheorem t : True :=\n  trivial\nend P\n"})
-    assert D.main(["summary", "--root", str(root), "--fail-on-sorry", "--fail-on-axioms"]) == 0
+    assert D.main(["summary", "--project", str(root), "--fail-on-sorry", "--fail-on-axioms"]) == 0
 
 
 def test_summary_without_gates_only_reports(tmp_path: Path) -> None:
     root = _write_lean_tree(tmp_path, {"A.lean": "namespace P\ntheorem t : True :=\n  sorry\nend P\n"})
-    assert D.main(["summary", "--root", str(root)]) == 0
+    assert D.main(["summary", "--project", str(root)]) == 0
 
 
 # A gate that scanned nothing must not pass as clean (the sentinel
@@ -980,20 +974,99 @@ def test_summary_without_gates_only_reports(tmp_path: Path) -> None:
 def test_dep_tree_exits_2_when_nothing_is_scanned(tmp_path: Path) -> None:
     root = _write_lean_tree(tmp_path, {})
     with pytest.raises(SystemExit) as e:
-        D.main(["summary", "--root", str(root)])
+        D.main(["summary", "--project", str(root)])
     assert e.value.code == 2
 
 
 def test_heavy_tactics_exits_2_when_nothing_is_scanned(tmp_path: Path) -> None:
     root = _write_lean_tree(tmp_path, {})
     with pytest.raises(SystemExit) as e:
-        H.main(["--root", str(root)])
+        H.main(["--project", str(root)])
     assert e.value.code == 2
 
 
 def test_files_without_decls_are_not_an_empty_scan(tmp_path: Path) -> None:
     root = _write_lean_tree(tmp_path, {"A.lean": "import Foo\n"})
-    assert D.main(["summary", "--root", str(root)]) == 0
+    assert D.main(["summary", "--project", str(root)]) == 0
+
+
+# ---------------------------------------------------------------------------
+# build-times: module discovery and the timing record
+# ---------------------------------------------------------------------------
+
+# `lake` is never invoked here: `discover_modules` is pure, and `time_one` is
+# driven against a stub subprocess. What the real `lake` costs is the one thing
+# these cannot assert; everything around it is testable without a toolchain.
+
+
+def _lib_tree(tmp_path: Path, files: dict[str, str], lakefile: str = "") -> Path:
+    root = _write_lean_tree(tmp_path, files)
+    if lakefile:
+        (root / P.CONFIG_NAME).write_text(lakefile, encoding="utf-8")
+    return root
+
+
+def test_discover_modules_takes_the_aggregator_and_its_directory(tmp_path: Path) -> None:
+    root = _lib_tree(tmp_path, {"Lib.lean": "", "Lib/A.lean": "", "Lib/Sub/B.lean": "", "Other/C.lean": ""})
+    assert [r.as_posix() for r in B.discover_modules(root, ["Lib"], [])] == [
+        "Lib.lean",
+        "Lib/A.lean",
+        "Lib/Sub/B.lean",
+    ]
+
+
+def test_discover_modules_honours_the_scan_config(tmp_path: Path) -> None:
+    """`lean4-lens.toml` decides what counts as project code here too, so a
+    module the other tools ignore is not timed either."""
+    root = _lib_tree(tmp_path, {"Lib/A.lean": "", "Lib/Old/B.lean": ""}, '[scan]\nskip_dirs = ["Old"]\n')
+    assert [r.as_posix() for r in B.discover_modules(root, ["Lib"], [])] == ["Lib/A.lean"]
+
+
+def test_discover_modules_excludes_named_directory_components(tmp_path: Path) -> None:
+    root = _lib_tree(tmp_path, {"Lib/A.lean": "", "Lib/Draft/B.lean": ""})
+    assert [r.as_posix() for r in B.discover_modules(root, ["Lib"], ["Draft"])] == ["Lib/A.lean"]
+
+
+class _Proc:
+    """Just the `subprocess.run` result fields `time_one` reads."""
+
+    def __init__(self, returncode: int, stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = ""
+        self.stderr = stderr
+
+
+def test_time_one_reports_the_minimum_of_its_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The minimum, not the last or the mean: it is the least noisy estimate
+    of what the module actually costs."""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(0))
+    # start/end pairs, so the three runs measure 3.0s, 1.0s and 2.0s
+    ticks = iter([0.0, 3.0, 10.0, 11.0, 20.0, 22.0])
+    monkeypatch.setattr(time, "perf_counter", lambda: next(ticks))
+    record = B.time_one(Path("Lib/A.lean"), tmp_path, runs=3)
+    assert record["seconds"] == 1.0
+    assert record["runs"] == 3
+    assert record["module"] == "Lib.A"
+    assert record["ok"] is True
+    assert "error_tail" not in record
+
+
+def test_time_one_stops_and_records_a_failing_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A module that does not compile is recorded, not fatal — and is not
+    retried, since it will not get faster."""
+    calls = 0
+
+    def fake_run(*_a: object, **_k: object) -> _Proc:
+        nonlocal calls
+        calls += 1
+        return _Proc(1, stderr="error: unknown identifier 'foo'")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    record = B.time_one(Path("Lib/A.lean"), tmp_path, runs=3)
+    assert calls == 1
+    assert record["ok"] is False
+    assert record["returncode"] == 1
+    assert "unknown identifier" in record["error_tail"]
 
 
 # ---------------------------------------------------------------------------
@@ -1088,11 +1161,11 @@ class _EmitterTests(_MixinBase):
         project has no review-cone config to name them."""
         cls = type(self)
         if cls._cone_cache is None:
-            configs = sorted(cls.project.glob(R.CONE_CONFIG_GLOB))
+            configs = sorted(cls.project.glob(C.CONE_CONFIG_GLOB))
             if not configs:
                 self.skipTest("the test project has no review-cone config to take roots from")
             cone = Path(self.tmp.name) / "cone.json"
-            cls._run_emitter(cone, deps=False, roots=R.load_config(configs[0])["roots"])
+            cls._run_emitter(cone, deps=False, roots=C.load_config(configs[0])["roots"])
             cls._cone_cache = json.loads(cone.read_text())
         return cls._cone_cache
 

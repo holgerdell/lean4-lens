@@ -1,5 +1,5 @@
 {
-  "projectRoot": "/Users/hold/.agents/tools/lean4-lens/tests/lean-v4.19.0",
+  "projectRoot": ".",
   "roots": 0,
   "standardAxioms": ["propext", "Classical.choice", "Quot.sound"],
   "fieldOf": {

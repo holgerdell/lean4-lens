@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Measure per-module build time for a Lean package via `lake`.
 
 For every module in the project's libraries, this recompiles just that file with
@@ -73,12 +72,11 @@ def time_one(rel: Path, root: Path, runs: int) -> dict[str, Any]:
             text=True,
         )
         elapsed = time.perf_counter() - start
+        best = elapsed if best is None else min(best, elapsed)
         rc = proc.returncode
         if rc != 0:
             err_tail = (proc.stderr or proc.stdout or "").strip()[-800:]
-            best = elapsed if best is None else min(best, elapsed)
             break  # a failing module won't get faster; don't repeat
-        best = elapsed if best is None else min(best, elapsed)
     record = {
         "module": module_of(rel),
         "path": rel.as_posix(),
