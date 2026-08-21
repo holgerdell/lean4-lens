@@ -87,7 +87,36 @@ uv run mypy
 uv run pytest
 ```
 
-The emitter tests need a built Lean project and skip without one:
+`uv run pytest` uses one interpreter. To run the suite on every supported
+Python — 3.11 through 3.14, plus the 3.15 release candidate as early warning —
+use tox:
+
+```sh
+uv tool install tox --with tox-uv   # once
+tox            # every version
+tox -e py311   # one of them
+```
+
+### The Lean fixture projects
+
+The emitter runs on Lean v4.19 and up; v4.18 and older lack the
+`importModules` options it needs.
+
+`tests/lean-v*` are tiny Lean projects, one per pinned toolchain — the oldest
+supported release, three newer ones and the current release candidate — that
+the emitter tests run against: the assertions that need real elaborator output
+rather than fixture JSON. They depend on Lean core only, so each builds in a couple of seconds:
+
+```sh
+cd tests/lean-v4.33.0 && lake build
+```
+
+An unbuilt one skips (building it would make pytest download a toolchain), so a
+fresh clone runs the fast tests and nothing else. Adding a version means copying
+a directory and editing its `lean-toolchain`; regenerate its committed
+`dep-graph.json` with `lean4-lens dep-graph` from inside it.
+
+To point the same tests at a real project instead of the fixtures:
 
 ```sh
 LEANLENS_TEST_PROJECT=/path/to/lean/project uv run pytest

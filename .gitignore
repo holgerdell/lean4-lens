@@ -5,3 +5,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 dist/
+
+# Lean fixture builds (tests/lean-v*)
+.lake/
+lake-manifest.json
+.tox/

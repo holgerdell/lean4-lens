@@ -1,0 +1,12 @@
+title = "lean4-lens fixture"
+
+[[section]]
+title = "Results"
+decls = ["Fixture.sum_le", "Fixture.double_sum_pos"]
+
+[section.titles]
+"Fixture.sum_le" = "A coordinate bounds the sum"
+
+[support]
+title = "Supporting declarations"
+toc = true

@@ -6,9 +6,11 @@ Two feeds into one seam — the emitted `dep-graph.json`:
   the tool → assert what it reports. Plain pytest functions, grouped by topic
   (blanking/sorry, namespace stack, decl parsing, build_graph end-to-end,
   parser edge cases, load_cone contract, scratch-dir skipping).
-* **Slow** (`LEANLENS_TEST_PROJECT=<a built Lean project>`): `TestEmitter` runs
-  the real emitter against it and asserts what fixtures cannot — that coverage
-  is total, and that a theorem's refs include a dep only its proof uses.
+* **Slow** (a *built* Lean project): the real emitter runs against it and
+  asserts what fixtures cannot — that coverage is total, and that a theorem's
+  refs include a dep only its proof uses. One test class per project: the
+  `tests/lean-v*` fixtures, one per pinned Lean toolchain, or whatever
+  `LEANLENS_TEST_PROJECT` names instead. Unbuilt projects skip.
 
 Coverage focus (load-bearing functions whose bugs corrupt every report):
     - blank_comments_and_strings + sorry detection (status accuracy)
@@ -28,7 +30,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
@@ -998,39 +1000,71 @@ def test_files_without_decls_are_not_an_empty_scan(tmp_path: Path) -> None:
 # Slow feed: the real emitter (opt-in)
 # ---------------------------------------------------------------------------
 
-# A built Lean project to run the emitter against. Without it the class skips:
-# these assertions need real elaborator output, which no fixture can supply.
+# Which built Lean projects to run the emitter against. By default the fixture
+# projects in this directory, one per pinned Lean toolchain (`tests/lean-v*`);
+# LEANLENS_TEST_PROJECT points at a real project instead. Either way the project
+# must already be built — `lake build` in it, which fetches its toolchain.
 PROJECT_ENV = "LEANLENS_TEST_PROJECT"
-PROJECT = Path(os.environ[PROJECT_ENV]).resolve() if os.environ.get(PROJECT_ENV) else None
+FIXTURE_GLOB = "lean-v*"
 
 
-def _run_emitter(out: Path, *, deps: bool, roots: Sequence[str] = ()) -> None:
-    """Run the Lean emitter against the test project, writing JSON to `out`.
-    Goes through the command's own code path, so a broken invocation fails here
-    too."""
-    assert PROJECT is not None
-    R.run_review_cone(PROJECT, P.read_lib_names(PROJECT), list(roots), out, build=False, deps=deps)
+def _projects() -> list[Path]:
+    env = os.environ.get(PROJECT_ENV)
+    if env:
+        return [Path(env).resolve()]
+    return sorted(d for d in Path(__file__).parent.glob(FIXTURE_GLOB) if P.has_lakefile(d))
 
 
-class TestEmitter(unittest.TestCase):
-    """The real emitter's output. Opt-in: each run costs a Lean import of the
-    whole project, and it skips rather than fails without a built one."""
+def _is_built(project: Path) -> bool:
+    """Whether the project has compiled modules. Older Lake versions put the
+    `.olean` files straight into `.lake/build/lib`, newer ones into a `lean/`
+    subdirectory of it, so look for the files rather than a fixed path."""
+    return any((project / ".lake" / "build" / "lib").glob("**/*.olean"))
 
-    emitted: Path
-    tmp: tempfile.TemporaryDirectory[str]
+
+if TYPE_CHECKING:
+    # `self.assert*` and `skipTest` come from the TestCase each generated
+    # subclass mixes in; the mixin must not be one itself, or pytest would
+    # collect it with no project set.
+    class _MixinBase(unittest.TestCase): ...
+
+else:
+
+    class _MixinBase: ...
+
+
+class _EmitterTests(_MixinBase):
+    """The real emitter's output, asserted against one built Lean project —
+    what fixture JSON cannot supply. Not a TestCase itself: one subclass per
+    project is generated below.
+
+    Each run costs a Lean import of the whole project, so it skips rather than
+    fails when that project is not built.
+    """
+
+    project: ClassVar[Path]
+    emitted: ClassVar[Path]
+    tmp: ClassVar[tempfile.TemporaryDirectory[str]]
+
+    @classmethod
+    def _run_emitter(cls, out: Path, *, deps: bool, roots: Sequence[str] = ()) -> None:
+        """Run the Lean emitter, writing JSON to `out`. Goes through the
+        command's own code path, so a broken invocation fails here too."""
+        libs = P.read_lib_names(cls.project)
+        R.run_review_cone(cls.project, libs, list(roots), out, build=False, deps=deps)
 
     @classmethod
     def setUpClass(cls) -> None:
-        if PROJECT is None:
-            raise unittest.SkipTest(f"set {PROJECT_ENV}=<a built Lean project> to run the emitter")
         if shutil.which("lake") is None:
             raise unittest.SkipTest("no `lake` on PATH")
+        if not _is_built(cls.project):
+            raise unittest.SkipTest(f"not built — run `lake build` in {cls.project}")
         cls.tmp = tempfile.TemporaryDirectory()
         cls.emitted = Path(cls.tmp.name) / "dep-graph.json"
-        try:
-            _run_emitter(cls.emitted, deps=True)
-        except SystemExit as e:
-            raise unittest.SkipTest(f"emitter did not run (is the project built?): {e}") from e
+        # No `except SystemExit: skip` here. The project is built (checked
+        # above), so an emitter that will not run is this tool failing against
+        # that Lean version — exactly what these tests exist to catch.
+        cls._run_emitter(cls.emitted, deps=True)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -1044,23 +1078,21 @@ class TestEmitter(unittest.TestCase):
     def _graph(self) -> D.Graph:
         """The project graph, built against freshly emitted data. Reads it in
         place: a test must never write over the project's own artifact."""
-        assert PROJECT is not None
         cls = type(self)
         if cls._graph_cache is None:
-            cls._graph_cache = D.build_graph(PROJECT, self.emitted)
+            cls._graph_cache = D.build_graph(cls.project, self.emitted)
         return cls._graph_cache
 
     def _cone_data(self) -> dict[str, Any]:
         """The document's JSON for the project's own roots, or a skip when the
         project has no review-cone config to name them."""
-        assert PROJECT is not None
         cls = type(self)
         if cls._cone_cache is None:
-            configs = sorted(PROJECT.glob(R.CONE_CONFIG_GLOB))
+            configs = sorted(cls.project.glob(R.CONE_CONFIG_GLOB))
             if not configs:
                 self.skipTest("the test project has no review-cone config to take roots from")
             cone = Path(self.tmp.name) / "cone.json"
-            _run_emitter(cone, deps=False, roots=R.load_config(configs[0])["roots"])
+            cls._run_emitter(cone, deps=False, roots=R.load_config(configs[0])["roots"])
             cls._cone_cache = json.loads(cone.read_text())
         return cls._cone_cache
 
@@ -1096,7 +1128,6 @@ class TestEmitter(unittest.TestCase):
         """A structure/class/inductive is labeled by its own keyword — the
         review document prints the label, so an `inductive` must not say
         "structure"."""
-        assert PROJECT is not None
         sources: dict[str, list[str]] = {}
         bad: list[str] = []
         for e in json.loads(self.emitted.read_text())["project"]:
@@ -1104,7 +1135,7 @@ class TestEmitter(unittest.TestCase):
             if kind not in ("structure", "class", "inductive") or e["startLine"] <= 0:
                 continue
             if e["module"] not in sources:
-                path = PROJECT / P.module_path(e["module"])
+                path = self.project / P.module_path(e["module"])
                 sources[e["module"]] = path.read_text(encoding="utf-8").splitlines()
             block = "\n".join(sources[e["module"]][e["startLine"] - 1 : e["endLine"]])
             if not re.search(rf"\b{kind}\b", block):
@@ -1128,12 +1159,17 @@ class TestEmitter(unittest.TestCase):
     def test_taint_does_not_shrink(self) -> None:
         """Every decl tainted under the project's committed data stays tainted
         under fresh data. A shrinking taint set reports proofs clean that are not."""
-        assert PROJECT is not None
-        if not (PROJECT / P.DEP_GRAPH_NAME).is_file():
+        if not (self.project / P.DEP_GRAPH_NAME).is_file():
             self.skipTest("no committed dep-graph.json to compare against")
-        before = {d.full_name for d in D.build_graph(PROJECT).decls if d.tainted}
+        before = {d.full_name for d in D.build_graph(self.project).decls if d.tainted}
         after = {d.full_name for d in self._graph().decls if d.tainted}
         self.assertEqual(before - after, set(), "declarations lost their taint")
+
+
+# One TestCase per project, so a failure names the Lean version it came from.
+for _project in _projects():
+    _name = "TestEmitter_" + re.sub(r"\W", "_", _project.name)
+    globals()[_name] = type(_name, (_EmitterTests, unittest.TestCase), {"project": _project})
 
 
 if __name__ == "__main__":

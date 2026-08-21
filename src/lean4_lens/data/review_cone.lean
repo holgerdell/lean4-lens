@@ -15,6 +15,10 @@ Project-independent by construction:
   * the project's libraries are discovered from its `lakefile` and imported
     dynamically at run time (no static `import` of project code), so this one
     file works unmodified in any Lean project;
+  * it imports Lean core only, so a project without Mathlib works too;
+  * it elaborates on Lean v4.19 and up. Where core's string API moved under it
+    (`String.ofList`, `trimAscii`, `drop`, `dropEnd`), the helpers below stand
+    in with one spelling that works across the whole range;
   * configuration is read from the environment:
       REVIEW_CONE_LIBS      comma-separated `lean_lib` names to scan (REQUIRED;
                             render_review_cone.py sets it from the lakefile)
@@ -41,7 +45,6 @@ Run it from the project root once the project is built:
 `render_review_cone.py` orchestrates that (build → run → render) for you.
 -/
 import Lean
-import Mathlib.Lean.Expr.Basic
 
 open Lean Elab Meta
 
@@ -86,7 +89,7 @@ partial def usedConsts (env : Environment) (e : Expr) : Array Name := Id.run do
     work := work.tail!
     if seen.contains n then continue
     seen := seen.insert n
-    if n == ``sorryAx then continue  -- placeholder left by `Expr.eraseProofs`
+    if n == ``sorryAx then continue  -- placeholder left by `eraseProofs`
     -- `Lean.*` constants are elaboration internals (e.g. an omega certificate
     -- in a def value), never genuine statement dependencies of a project.
     if (`Lean).isPrefixOf n then continue
@@ -105,13 +108,23 @@ partial def usedConsts (env : Environment) (e : Expr) : Array Name := Id.run do
       out := out.push u
   return out
 
+/-- `e` with every proof subterm replaced by a `sorryAx` placeholder, so a
+statement's embedded proof terms (an instance's field, a tactic-built index
+bound, …) contribute no constants of their own. -/
+def eraseProofs (e : Expr) : MetaM Expr :=
+  Meta.transform e (skipConstInApp := true)
+    (pre := fun s => do
+      if ← Meta.isProof s then
+        return .done (← mkSorry (← Meta.inferType s) true)
+      return .continue)
+
 /-- All constants this decl exposes: its type, the field types of a
 structure/inductive, and — when `withValue` — its value, including a theorem's
 proof. Proof subterms embedded in *types* are erased first, so tactic internals
 are never reported as dependencies. -/
 def stmtConsts (env : Environment) (ci : ConstantInfo) (withValue : Bool) :
     MetaM (Array Name) := do
-  let mut r := usedConsts env (← ci.type.eraseProofs)
+  let mut r := usedConsts env (← eraseProofs ci.type)
   if withValue then
     match ci with
     | .defnInfo d => r := r ++ usedConsts env d.value
@@ -122,7 +135,7 @@ def stmtConsts (env : Environment) (ci : ConstantInfo) (withValue : Bool) :
   | .inductInfo iv =>
     for c in iv.ctors do
       if let some (.ctorInfo cv) := env.find? c then
-        r := r ++ usedConsts env (← cv.type.eraseProofs)
+        r := r ++ usedConsts env (← eraseProofs cv.type)
   | _ => pure ()
   return r
 
@@ -180,7 +193,7 @@ partial def closure (env : Environment) (prefixes : Array Name) (roots : Array N
   let mut work : List Name := []
   for r in roots do
     if let some ci := env.find? r then
-      work := work ++ (usedConsts env (← ci.type.eraseProofs)).toList
+      work := work ++ (usedConsts env (← eraseProofs ci.type)).toList
   while !work.isEmpty do
     let n := work.head!
     work := work.tail!
@@ -235,6 +248,26 @@ def kindStr (env : Environment) (n : Name) : String :=
   | some (.axiomInfo _) => "axiom"
   | _ => "other"
 
+/-- `List Char` as a `String`. Spelled with `String.push` because the direct
+spellings are each unavailable at one end of the supported range: `String.ofList`
+does not exist before Lean v4.27, and `String.mk` is deprecated from v4.27 on. -/
+def ofChars (cs : List Char) : String := cs.foldl (·.push ·) ""
+
+/-- `s` without leading or trailing ASCII whitespace. Same reason as `ofChars`:
+`String.trimAscii` arrived in v4.27 and `String.trim` is deprecated from v4.27
+on, so neither spelling works across the range. -/
+def trimAscii (s : String) : String :=
+  ofChars ((s.toList.dropWhile Char.isWhitespace).reverse.dropWhile Char.isWhitespace).reverse
+
+/-- `s` with its first `n` characters dropped. `String.drop` answers a `String`
+before Lean v4.27 and a `String.Slice` from v4.27 on, so its result type is not
+portable; this one is always a `String`. -/
+def dropChars (s : String) (n : Nat) : String := ofChars (s.toList.drop n)
+
+/-- `s` with its last `n` characters dropped. `String.dropEnd` arrived in Lean
+v4.27, so the older half of the range has no spelling for it at all. -/
+def dropEndChars (s : String) (n : Nat) : String := ofChars (s.toList.take (s.length - n))
+
 /-- JSON-escape a string: the mandatory `"` and `\` plus the whitespace control
 chars, and any remaining control char (< U+0020) as a `\uXXXX` escape, so a decl
 or module name containing an escaped identifier can never emit malformed JSON. -/
@@ -248,8 +281,8 @@ def jsonEsc (s : String) : String :=
       | '\t' => "\\t"
       | c =>
         if c.toNat < 0x20 then
-          let hex := String.ofList (Nat.toDigits 16 c.toNat)
-          "\\u" ++ String.ofList (List.replicate (4 - hex.length) '0') ++ hex
+          let hex := ofChars (Nat.toDigits 16 c.toNat)
+          "\\u" ++ ofChars (List.replicate (4 - hex.length) '0') ++ hex
         else c.toString) ""
 
 /-- The axioms a `verified` classification may depend on; any other axiom marks
@@ -358,7 +391,7 @@ def emitJson (prefixes : Array Name) (projectRoot : String) (roots : Array Name)
 /-- Comma-split an env-var value into trimmed, non-empty pieces. -/
 def splitComma (s : String) : List String :=
   (s.splitOn ",").filterMap (fun x =>
-    let t := x.trimAscii.toString
+    let t := trimAscii x
     if t == "" then none else some t)
 
 /-- Walk up from `dir` to the nearest directory containing a lakefile. -/
@@ -407,8 +440,8 @@ def libModules (root : System.FilePath) (lib : String) : IO (Array Name) := do
   if ← libDir.pathExists then
     let prefixLen := root.toString.length + 1  -- strip "<root>/"
     for p in (← walkLeanFiles libDir) do
-      let rel := (p.toString.drop prefixLen).dropEnd ".lean".length
-      mods := mods.push (pathToModule rel.toString)
+      let rel := dropEndChars (dropChars p.toString prefixLen) ".lean".length
+      mods := mods.push (pathToModule rel)
   let mut built : Array Name := #[]
   for m in mods do
     if ← hasOlean m then
@@ -436,12 +469,12 @@ def directImports (root : System.FilePath) (m : Name) : IO (Array Name) := do
   if !(← path.pathExists) then return #[]
   let mut out : Array Name := #[]
   for line in (← IO.FS.readFile path).splitOn "\n" do
-    let l := line.trimAscii.toString
+    let l := trimAscii line
     if l.startsWith "import " || l.startsWith "public import " then
-      let l := if l.startsWith "public " then l.drop "public ".length else l
-      let l := l.drop "import ".length
-      let l := if l.startsWith "all " then l.drop "all ".length else l
-      out := out.push l.trimAscii.toName
+      let l := if l.startsWith "public " then dropChars l "public ".length else l
+      let l := dropChars l "import ".length
+      let l := if l.startsWith "all " then dropChars l "all ".length else l
+      out := out.push (trimAscii l).toName
   return out
 
 /-- Drop from `mods` every module whose transitive imports (per
@@ -507,7 +540,7 @@ unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : N
     -- contains <decl>" message; a rewording downgrades this to a hard error.
     match (toString e).splitOn " failed, environment already contains" with
     | [modStr, _] =>
-      let bad := (modStr.drop "import ".length).trimAscii.toName
+      let bad := (trimAscii (dropChars modStr "import ".length)).toName
       let mut banned : NameSet := ({} : NameSet).insert bad
       let mut changed := true
       while changed do
