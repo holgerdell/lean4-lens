@@ -223,12 +223,35 @@ def anchor_id(name: str) -> str:
     return "d-" + "".join(ch if (ch.isascii() and ch.isalnum()) else f"_{ord(ch)}" for ch in name)
 
 
+# `native_decide` mints one throwaway axiom per use, named after the
+# declaration that used it, so the raw list is unreadable at any scale.
+NATIVE_DECIDE_AX_RE = re.compile(r"\._native\.native_decide\.ax(_\d+)*$")
+
+
+def summarize_axioms(axioms: list[str]) -> list[str]:
+    """The axiom names to show, with the per-use `native_decide` axioms folded
+    into one `native_decide (×n)` entry that keeps their first position."""
+    out: list[str] = []
+    native = 0
+    for a in axioms:
+        if NATIVE_DECIDE_AX_RE.search(a):
+            if not native:
+                out.append("")  # placeholder, filled in once the count is known
+            native += 1
+        else:
+            out.append(a)
+    if native:
+        label = "native_decide" if native == 1 else f"native_decide (×{native})"
+        out[out.index("")] = label
+    return out
+
+
 def status_badge(d: ConeDecl) -> str:
     st = d.status
     if st == "verified":
         return "<span class='badge verified' title='sorry-free; standard axioms only'>✓ Verified</span>"
     if st == "tainted":
-        ax = ", ".join(d.axioms)
+        ax = ", ".join(summarize_axioms(d.axioms))
         return (
             f"<span class='badge tainted' title='sorry-free but depends on extra axioms'>"
             f"⚠ Tainted</span><span class='axioms'>{html.escape(ax)}</span>"
