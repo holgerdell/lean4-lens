@@ -261,16 +261,21 @@ def status_badge(d: ConeDecl) -> str:
     return ""
 
 
-def render_decl(d: ConeDecl, body_html: str, title: str = "") -> str:
+def render_decl(d: ConeDecl, body_html: str, title: str = "", label: str = "") -> str:
     """One declaration's entry — every decl renders through this, in whatever
     section it lands: `<kind> <name> (optional title) [badge]`, then the source
-    body. The optional display title comes from the config's `[section.titles]`."""
+    body. A label from `[section.labels]` ("Theorem 1") replaces the kind and
+    the name, which the source body below already shows; the optional display
+    title comes from `[section.titles]`."""
     name = d.name
     title_html = f" <span class='title'>({html.escape(title)})</span>" if title else ""
+    if label:
+        head_html = f"<strong class='label'>{html.escape(label)}</strong>"
+    else:
+        head_html = f"<span class='head'>{html.escape(d.kind)}</span> <strong class='self'>{html.escape(name)}</strong>"
     return (
         f"<div class='entry'><h3 id='{anchor_id(name)}'>"
-        f"<span class='head'>{html.escape(d.kind)}</span> "
-        f"<strong class='self'>{html.escape(name)}</strong>"
+        f"{head_html}"
         f"{title_html} {status_badge(d)}</h3>"
         f"{body_html}</div>"
     )
@@ -562,6 +567,7 @@ a.proj:hover { text-decoration: underline; }
 a.mlib { color: var(--link-mlib); text-decoration: none; }
 a.mlib:hover { text-decoration: underline; }
 strong.self { color: var(--self); }
+strong.label { font-weight: var(--fw-semibold); }
 .cmt { color: var(--cmt); font-style: italic; }
 .head { font-weight: var(--fw-semibold); }
 .title { font-weight: var(--fw-semibold); }
@@ -621,11 +627,14 @@ def render(
     idx = build_indexes(project, mathlib, field_of)
     proj_full, proj_target = idx.proj_full, idx.proj_target
 
-    # Config drives the layout: `title_map` supplies display titles (union of
-    # all `[section.titles]`).
+    # Config drives the layout: `title_map` and `label_map` supply display
+    # titles and headline labels (the union of all `[section.titles]` and
+    # `[section.labels]`).
     title_map: dict[str, str] = {}
+    label_map: dict[str, str] = {}
     for sec in config["sections"]:
         title_map.update(sec["titles"])
+        label_map.update(sec["labels"])
 
     # Read each decl's source once; the cache reads each *module* once.
     module_lines: dict[str, list[str]] = {}
@@ -688,7 +697,7 @@ def render(
     # and skipped. Every unplaced cone member falls into the support catch-all,
     # topologically sorted (dependencies first, so it reads with no forward refs).
     placed: set[str] = set()
-    section_entries: list[tuple[str, list[ConeDecl]]] = []
+    section_entries: list[tuple[str, bool, list[ConeDecl]]] = []
     for sec in config["sections"]:
         entries: list[ConeDecl] = []
         for name in sec["decls"]:
@@ -702,7 +711,7 @@ def render(
             if name not in placed:
                 placed.add(name)
                 entries.append(entry)
-        section_entries.append((sec["title"], entries))
+        section_entries.append((sec["title"], sec["toc"], entries))
     support = topo_sort([d for d in project if d.name not in placed], key=lambda d: d.name.lower())
     support_title = config["support"]["title"]
 
@@ -779,12 +788,12 @@ def render(
         )
 
     def toc_label(d: ConeDecl) -> str:
-        t = title_map.get(d.name)
-        return html.escape(t) if t else html.escape(d.name)
+        parts = [p for p in (label_map.get(d.name), title_map.get(d.name) or d.name) if p]
+        return html.escape(" — ".join(parts))
 
     ptitle = title_override or (f"the {package}" if package else "this Lean project")
     title = "Review cone — " + ptitle
-    named_titles = [t for t, entries in section_entries if entries]  # headings that actually render, in order
+    named_titles = [t for t, _, entries in section_entries if entries]  # headings that actually render, in order
 
     def _em(t: str) -> str:
         return f"<em>{html.escape(t)}</em>"
@@ -820,10 +829,10 @@ def render(
     ]
     parts.append(panel)
 
-    parts.append("<h2>Contents</h2><div class='toc'>")
-    for sec_title, entries in section_entries:
-        if not entries:
-            continue
+    toc_sections = [(t, e) for t, in_toc, e in section_entries if e and in_toc]
+    if toc_sections or (support and show_support_toc):
+        parts.append("<h2>Contents</h2><div class='toc'>")
+    for sec_title, entries in toc_sections:
         parts.append(f"<div class='tocgroup'>{html.escape(sec_title)} ({len(entries)})</div>")
         for d in entries:
             parts.append(f"<a href='#{anchor_id(d.name)}'>{toc_label(d)}</a><br>")
@@ -831,14 +840,17 @@ def render(
         parts.append(f"<div class='tocgroup'>{html.escape(support_title)} ({len(support)})</div>")
         for d in support:
             parts.append(f"<a href='#{anchor_id(d.name)}'>{html.escape(d.name)}</a><br>")
-    parts.append("</div>")
+    if toc_sections or (support and show_support_toc):
+        parts.append("</div>")
 
-    for sec_title, entries in section_entries:
+    for sec_title, _, entries in section_entries:
         if not entries:
             continue
         parts.append(f"<h2>{html.escape(sec_title)}</h2>")
         for d in entries:
-            parts.append(render_decl(d, _body(d) + used_by_html(d), title_map.get(d.name, "")))
+            parts.append(
+                render_decl(d, _body(d) + used_by_html(d), title_map.get(d.name, ""), label_map.get(d.name, ""))
+            )
     if support:
         parts.append(f"<h2>{html.escape(support_title)}</h2>")
         for d in support:

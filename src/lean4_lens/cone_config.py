@@ -25,6 +25,8 @@ class SectionConfig(TypedDict):
     title: str
     decls: list[str]
     titles: dict[str, str]
+    labels: dict[str, str]
+    toc: bool
 
 
 class SupportConfig(TypedDict):
@@ -47,20 +49,47 @@ class ConfigError(SystemExit):
         super().__init__(cli.red("✗ review-cone.toml: ") + msg)
 
 
+def _read_name_table(
+    sec: dict[str, object], key: str, what: str, section_title: str, decls: list[str]
+) -> dict[str, str]:
+    """One `[section.<key>]` table, checked: every key is one of `decls` and
+    every value is a string. `what` names the entry in error messages."""
+    raw = sec.get(key, {})
+    if not isinstance(raw, dict):
+        raise ConfigError(f"section '{section_title}': `[section.{key}]` must be a table")
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str):
+            continue  # TOML keys are always strings; this only narrows for the type checker
+        if not isinstance(v, str):
+            raise ConfigError(
+                f"section '{section_title}': {what} for '{k}' is not a string — "
+                'a dotted Lean name must be quoted ("CountColorings.branch")'
+            )
+        if k not in decls:
+            raise ConfigError(f"section '{section_title}': {what} for '{k}', which is not one of its decls")
+        out[k] = v
+    return out
+
+
 def load_config(path: Path) -> ReviewConeConfig:
     """Parse and validate `review-cone.toml`. Returns
-        {"sections": [{"title": str, "decls": [name], "titles": {name: str}}],
+        {"sections": [{"title": str, "decls": [name], "titles": {name: str},
+          "labels": {name: str}, "toc": bool}],
          "support": {"title": str, "toc": bool},
          "roots": [name],          # union of all section decls, order-preserving
          "title": str | None,      # document title (CLI --title overrides)
          "out": str | None}        # output path, relative to the project root
     Every named decl is a root. Enforced invariants (each a hard error):
       * each `[[section]]` has a non-empty string `title` and a `decls` list of
-        strings;
+        strings, and an optional `toc` flag (default true) that lists it in the
+        table of contents;
       * no decl appears in two sections;
-      * every `[section.titles]` key is one of that section's decls, with a
-        string value (a value that parsed to a dict means an *unquoted* dotted
-        key — Lean names contain dots — which TOML silently nests)."""
+      * every `[section.titles]` and `[section.labels]` key is one of that
+        section's decls, with a string value (a value that parsed to a dict
+        means an *unquoted* dotted key — Lean names contain dots — which TOML
+        silently nests). A label ("Theorem 1") replaces the kind and the Lean
+        name in the entry's heading."""
     if not path.is_file():
         raise ConfigError(f"not found at {path} (pass --config to point elsewhere)")
     try:
@@ -90,22 +119,17 @@ def load_config(path: Path) -> ReviewConeConfig:
                 raise ConfigError(f"decl '{d}' is listed in both '{seen[d]}' and '{title}'")
             seen[d] = title
             roots.append(d)
-        raw_titles = sec.get("titles", {})
-        if not isinstance(raw_titles, dict):
-            raise ConfigError(f"section '{title}': `[section.titles]` must be a table")
-        titles: dict[str, str] = {}
-        for k, v in raw_titles.items():
-            if not isinstance(k, str):
-                continue  # TOML keys are always strings; this only narrows for the type checker
-            if not isinstance(v, str):
-                raise ConfigError(
-                    f"section '{title}': title for '{k}' is not a string — "
-                    'a dotted Lean name must be quoted ("CountColorings.branch")'
-                )
-            if k not in decls:
-                raise ConfigError(f"section '{title}': title for '{k}', which is not one of its decls")
-            titles[k] = v
-        sections.append({"title": title, "decls": decls, "titles": titles})
+        titles = _read_name_table(sec, "titles", "title", title, decls)
+        labels = _read_name_table(sec, "labels", "label", title, decls)
+        sections.append(
+            {
+                "title": title,
+                "decls": decls,
+                "titles": titles,
+                "labels": labels,
+                "toc": bool(sec.get("toc", True)),
+            }
+        )
 
     sup = raw.get("support", {})
     if not isinstance(sup, dict):
