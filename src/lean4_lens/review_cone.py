@@ -48,7 +48,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -391,6 +391,8 @@ class Indexes:
     proj_final: dict[str, str]  # globally-unique final component -> full name
     mlib_final: dict[str, str]
     proj_target: dict[str, str]  # full name -> anchor target (fields -> struct)
+    field_by_final: dict[str, list[str]]  # field's final component -> its full names
+    prop_fields: set[str]  # full names of the fields that hold a proof, not data
 
 
 @dataclass(frozen=True)
@@ -405,7 +407,12 @@ class LinkCtx:
     local_qual_final: dict[str, str]
 
 
-def build_indexes(project: list[ConeDecl], mathlib: list[MathlibDecl], field_of: dict[str, str]) -> Indexes:
+def build_indexes(
+    project: list[ConeDecl],
+    mathlib: list[MathlibDecl],
+    field_of: dict[str, str],
+    prop_fields: set[str] | None = None,
+) -> Indexes:
     proj_full: dict[str, ConeDecl | None] = {d.name: d for d in project}
     # structure-field projections resolve too, but their link target is the
     # parent structure (they are not emitted as their own entries).
@@ -414,6 +421,9 @@ def build_indexes(project: list[ConeDecl], mathlib: list[MathlibDecl], field_of:
         proj_full.setdefault(fld, None)
         proj_target[fld] = struct
     mlib_full: dict[str, MathlibDecl] = {d.name: d for d in mathlib}
+    field_by_final: dict[str, list[str]] = defaultdict(list)
+    for fld in field_of:
+        field_by_final[fld.split(".")[-1]].append(fld)
 
     def unique_final(names: list[str]) -> dict[str, str]:
         cnt = Counter(n.split(".")[-1] for n in names)
@@ -425,6 +435,8 @@ def build_indexes(project: list[ConeDecl], mathlib: list[MathlibDecl], field_of:
         proj_final=unique_final(list(proj_full)),
         mlib_final=unique_final(list(mlib_full)),
         proj_target=proj_target,
+        field_by_final=field_by_final,
+        prop_fields=prop_fields or set(),
     )
 
 
@@ -440,6 +452,8 @@ def linkify_chunk(chunk: str, ctx: LinkCtx) -> str:
         if full == define_name or text == define_name:
             return f'<strong class="self">{html.escape(text)}</strong>'
         target = proj_target.get(full, full)
+        if target == define_name:
+            return html.escape(text)  # a field of the decl being rendered: linking would point here
         return f'<a class="proj" href="#{anchor_id(target)}">{html.escape(text)}</a>'
 
     def mlib_link(full: str, text: str) -> str:
@@ -512,17 +526,83 @@ def split_code_comments(src: str) -> list[tuple[str, bool]]:
     return spans
 
 
+# The left-hand side of a `where` field assignment: a field name, then its
+# binders, then `:=`. Matched per line, so it cannot span a term.
+_FIELD_LHS_RE = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_'!?]*)((?:\s+(?:_|[A-Za-z_][A-Za-z0-9_'!?]*))*\s*:=)")
+
+
+def linkify_code(text: str, ctx: LinkCtx) -> str:
+    out = []
+    for part in _DELIM_RE.split(text):
+        if part == "" or _DELIM_RE.fullmatch(part):
+            out.append(html.escape(part))
+        else:
+            out.append(linkify_chunk(part, ctx))
+    return "".join(out)
+
+
+def struct_of_where_block(src: str, idx: Indexes) -> str | None:
+    """The structure a `where` block builds, guessed from the field names it
+    assigns: each unambiguous one votes for its structure, and the winner names
+    the block. `None` when nothing votes."""
+    votes: Counter[str] = Counter()
+    for line in src.splitlines():
+        m = _FIELD_LHS_RE.match(line)
+        if m is None:
+            continue
+        fulls = idx.field_by_final.get(m.group(2), [])
+        if len(fulls) == 1:
+            votes[idx.proj_target.get(fulls[0], fulls[0])] += 1
+    return votes.most_common(1)[0][0] if votes else None
+
+
+def linkify_code_line(line: str, ctx: LinkCtx, struct: str | None) -> tuple[str, bool]:
+    """One line of code, and whether it assigns a proof field. A field assignment
+    names a field of `struct`, the structure being built, so its left-hand side
+    links there — never to an unrelated decl that happens to share the name. With
+    no `struct`, only a name that is a field of exactly one structure is linked."""
+    m = _FIELD_LHS_RE.match(line)
+    if m is None:
+        return linkify_code(line, ctx), False
+    name = m.group(2)
+    fulls = ctx.idx.field_by_final.get(name, [])
+    if struct is not None:
+        target = struct
+    elif len(fulls) == 1:
+        target = ctx.idx.proj_target.get(fulls[0], fulls[0])
+    else:
+        return linkify_code(line, ctx), False
+    if target == ctx.define_name:
+        return linkify_code(line, ctx), False
+    link = f'<a class="proj" href="#{anchor_id(target)}">{html.escape(name)}</a>'
+    rendered = html.escape(m.group(1)) + link + html.escape(m.group(3)) + linkify_code(line[m.end() :], ctx)
+    return rendered, f"{target}.{name}" in ctx.idx.prop_fields
+
+
+def linkify_code_block(text: str, ctx: LinkCtx, struct: str | None) -> str:
+    """A run of code lines. A proof field's assignment is greyed, and so are the
+    lines its proof continues onto — the ones indented deeper than it."""
+    out = []
+    proof_indent: int | None = None
+    for line in text.splitlines(keepends=True):
+        indent = len(line) - len(line.rstrip("\n").lstrip())
+        rendered, is_proof = linkify_code_line(line, ctx, struct)
+        if is_proof:
+            proof_indent = indent
+        elif proof_indent is not None and (line.strip() == "" or indent <= proof_indent):
+            proof_indent = None
+        out.append(f'<span class="proof">{rendered}</span>' if is_proof or proof_indent is not None else rendered)
+    return "".join(out)
+
+
 def linkify(src: str, ctx: LinkCtx) -> str:
+    struct = struct_of_where_block(src, ctx.idx)
     out = []
     for text, is_code in split_code_comments(src):
         if not is_code:
             out.append(f'<span class="cmt">{html.escape(text)}</span>')
             continue
-        for part in _DELIM_RE.split(text):
-            if part == "" or _DELIM_RE.fullmatch(part):
-                out.append(html.escape(part))
-            else:
-                out.append(linkify_chunk(part, ctx))
+        out.append(linkify_code_block(text, ctx, struct))
     return "".join(out)
 
 
@@ -569,6 +649,7 @@ a.mlib:hover { text-decoration: underline; }
 strong.self { color: var(--self); }
 strong.label { font-weight: var(--fw-semibold); }
 .cmt { color: var(--cmt); font-style: italic; }
+.proof, .proof a { color: var(--gray-400); }
 .head { font-weight: var(--fw-semibold); }
 .title { font-weight: var(--fw-semibold); }
 .paperref { font-size: var(--fs-sm); color: var(--gray-500); }
@@ -624,7 +705,7 @@ def render(
     project = [ConeDecl.from_json(d) for d in data["project"]]
     mathlib = sorted((MathlibDecl(d["name"], d.get("url", "")) for d in data["mathlib"]), key=lambda d: d.name.lower())
     field_of = data.get("fieldOf", {})
-    idx = build_indexes(project, mathlib, field_of)
+    idx = build_indexes(project, mathlib, field_of, set(data.get("propFields", [])))
     proj_full, proj_target = idx.proj_full, idx.proj_target
 
     # Config drives the layout: `title_map` and `label_map` supply display

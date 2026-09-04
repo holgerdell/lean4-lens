@@ -350,6 +350,17 @@ def emitJson (prefixes : Array Name) (projectRoot : String) (roots : Array Name)
     (fields.toList.eraseDups.map (fun (f, p) =>
       s!"    \"{jsonEsc (userName f).toString}\": \"{jsonEsc (userName p).toString}\""))
   out := out ++ "  \"fieldOf\": {\n" ++ fieldStr ++ "\n  },\n"
+  -- fields that hold a proof rather than data: a renderer greys their assignments
+  let mut propFields : Array Name := #[]
+  for n in projSorted do
+    if isStructure env n then
+      for f in getStructureFields env n do
+        let some ci := env.find? (n ++ f) | continue
+        if ← forallTelescopeReducing ci.type (fun _ body => isProp body) then
+          propFields := propFields.push (n ++ f)
+  let propStr := String.intercalate ",\n"
+    (propFields.toList.map (fun f => s!"    \"{jsonEsc (userName f).toString}\""))
+  out := out ++ "  \"propFields\": [\n" ++ propStr ++ "\n  ],\n"
   out := out ++ "  \"project\": [\n"
   let mut first := true
   let mut srcCache : NameMap String := {}
