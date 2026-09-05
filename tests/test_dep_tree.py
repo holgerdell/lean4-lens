@@ -884,6 +884,54 @@ def test_n5_one_name_two_modules(tmp_path: Path) -> None:
     assert D.uncovered(g)[0] == []  # coverage reports no stale decls
 
 
+def test_n6_duplicate_private_names_get_module_uids(tmp_path: Path) -> None:
+    # N6. Two `private` copies of one name are two nodes, not a duplicate
+    # warning: uids carry the module, each same-module user resolves to its
+    # own copy (so sorry-taint stays inside the right copy), and a user
+    # elsewhere resolves to the public copy only.
+    root = _write_lean_tree(
+        tmp_path,
+        {
+            "A.lean": (
+                "namespace Pkg\nprivate theorem twin : True :=\n  trivial\n"
+                "theorem usesA : True :=\n  twin\nend Pkg\n"
+            ),
+            "B.lean": (
+                "namespace Pkg\nprivate theorem twin : True :=\n  sorry\n"
+                "theorem usesB : True :=\n  twin\nend Pkg\n"
+            ),
+            "Pub.lean": "namespace Pkg\ntheorem twin : True :=\n  trivial\nend Pkg\n",
+            "C.lean": "namespace Pkg\ntheorem usesC : True :=\n  twin\nend Pkg\n",
+        },
+    )
+    (root / P.DEP_GRAPH_NAME).write_text(
+        _cone(
+            [
+                {"name": "Pkg.twin", "module": "A", "kind": "theorem", "refs": ["True"]},
+                {"name": "Pkg.usesA", "module": "A", "kind": "theorem", "refs": ["Pkg.twin"]},
+                {"name": "Pkg.twin", "module": "B", "kind": "theorem", "refs": ["True"]},
+                {"name": "Pkg.usesB", "module": "B", "kind": "theorem", "refs": ["Pkg.twin"]},
+                {"name": "Pkg.twin", "module": "Pub", "kind": "theorem", "refs": ["True"]},
+                {"name": "Pkg.usesC", "module": "C", "kind": "theorem", "refs": ["Pkg.twin"]},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    g = D.build_graph(root)
+    assert {d.uid for d in g.decls if d.full_name == "Pkg.twin"} == {
+        "Pkg.twin@A",
+        "Pkg.twin@B",
+        "Pkg.twin@Pub",
+    }  # one node per copy — nothing evicted
+    assert all(d.refs_covered for d in g.decls)
+    assert D.uncovered(g)[0] == []
+    assert g.by_full["Pkg.usesA"].refs == ["Pkg.twin@A"]  # same-module copy
+    assert g.by_full["Pkg.usesB"].refs == ["Pkg.twin@B"]  # same-module copy
+    assert g.by_full["Pkg.usesC"].refs == ["Pkg.twin@Pub"]  # private copies invisible elsewhere
+    assert not g.by_full["Pkg.usesA"].tainted  # B's sorry stays in B's copy
+    assert g.by_full["Pkg.usesB"].tainted
+
+
 # ---------------------------------------------------------------------------
 # O. `.scratch` is not part of the project
 # ---------------------------------------------------------------------------

@@ -71,8 +71,9 @@ Every subcommand exits 2 when the scan finds no project .lean files at all —
 a gate that scanned nothing must not pass as clean.
 
 Name resolution for direct-deps/deps/used-by:
-exact full_name, then suffix match on '.NAME', then case-insensitive
-substring.
+exact uid or full_name, then suffix match on '.NAME', then case-insensitive
+substring. A name declared in several modules (e.g. `private` copies) has one
+uid per copy (`name@module`); querying the bare name lists the copies.
 """
 
 import argparse
@@ -181,6 +182,11 @@ INSTANCE_RE = re.compile(r"^" + symbols.ATTR_PREFIX + symbols.MODIFIERS + r"(?:i
 # block, never a proof body.
 IMPLICIT_ATTR_RE = re.compile(r"@\[[^\]]*\b(simp|ext|refl|grind|aesop|match_pattern|default_target)\b")
 
+# A `private` modifier on the decl header. Matched against `DECL_RE`'s full
+# match text (attrs + modifiers + keyword + name), so a `private` inside a
+# proof body never counts. Decides graph identity: see `Decl.uid`.
+PRIVATE_RE = re.compile(r"(?<![\w])private\b")
+
 # No dot before: `Proof.sorry` / `.sorry` reference an identifier that merely
 # shares the name — the sorry term is always bare.
 SORRY_RE = re.compile(r"(?<![\w.])sorry\b")
@@ -213,7 +219,7 @@ class Decl:
     file: str
     line: int
     has_sorry: bool
-    refs: list[str] = field(default_factory=list)
+    refs: list[str] = field(default_factory=list)  # graph uids (`Decl.uid`)
     tainted: bool = False
     is_axiom: bool = False  # stated `axiom` — an unproven assumption
     implicit_attr: str = ""  # matched @[simp]/@[ext]/… token; '' if none
@@ -222,6 +228,11 @@ class Decl:
     # True iff `dep-graph.json` vouched for this decl. False means `refs` is
     # empty for want of data, never that it is a guess — see `coverage`.
     refs_covered: bool = False
+    is_private: bool = False  # `private` decl — Lean mangles its stored name,
+    # so the same user-facing name can exist in many modules at once
+    module: str = ""  # Lean module parsed from (`module_of` on the file)
+    uid: str = ""  # graph identity: `full_name`, or `full_name@module`
+    # when several decls share one user-facing name
 
     @property
     def implicit_reach(self) -> bool:
@@ -234,6 +245,9 @@ class Decl:
 @dataclass
 class Graph:
     decls: list[Decl]
+    # Keyed by `Decl.uid` (the user-facing name when it is unique,
+    # `name@module` for a name several modules declare, e.g. `private`
+    # copies). Every `Decl.refs` entry and `rev` key is such a uid.
     by_full: dict[str, Decl]
     rev: dict[str, list[str]] = field(default_factory=dict)
     # The elaborator-derived cone map this graph's refs were built against,
@@ -374,6 +388,8 @@ def scan_file(path: Path, root: Path) -> list[Decl]:
                 implicit_attr=(m2.group(1) if (m2 := IMPLICIT_ATTR_RE.search(header)) else ""),
                 implicit_kind=bool(INSTANCE_RE.match(header)),
                 loc=max(1, len(body_span)),
+                is_private=bool(PRIVATE_RE.search(header)),
+                module=module_of(rel),
             )
         )
     return out
@@ -470,6 +486,7 @@ def _inject_sorry_virtual(by_full: dict[str, Decl], decls: list[Decl]) -> None:
         file="<builtin>",
         line=0,
         has_sorry=True,
+        uid="sorry",
     )
     by_full["sorry"] = sorry_decl
     for d in decls:
@@ -495,7 +512,7 @@ def _sorry_reachable(by_full: dict[str, Decl], rev: dict[str, list[str]]) -> set
     transitively depends on such a decl — i.e. reverse-reachable from the
     unproven seeds. Axioms are unproven assumptions, so they seed taint
     exactly like `sorry`."""
-    seeds = [d.full_name for d in by_full.values() if d.has_sorry or d.is_axiom]
+    seeds = [d.uid for d in by_full.values() if d.has_sorry or d.is_axiom]
     return _bfs(seeds, lambda n: rev.get(n, ()))
 
 
@@ -503,7 +520,7 @@ def _build_rev(by_full: dict[str, Decl]) -> dict[str, list[str]]:
     rev: dict[str, list[str]] = defaultdict(list)
     for d in by_full.values():
         for ref in d.refs:
-            rev[ref].append(d.full_name)
+            rev[ref].append(d.uid)
     return rev
 
 
@@ -530,6 +547,24 @@ def uncovered(g: Graph) -> tuple[list[Decl], list[Decl]]:
     return sorted(stale, key=by_file_line), sorted(uncompiled, key=by_file_line)
 
 
+def _resolve_ref_uids(ref: str, referrer: Decl, by_name: dict[str, list[Decl]]) -> list[str]:
+    """The graph node(s) a user-facing ref `ref` names, seen from `referrer`.
+
+    The elaborator reports user-facing names, so a name declared in several
+    modules (e.g. `private` copies) is ambiguous. A `private` decl is visible
+    only inside its own module, hence: a same-module copy wins; otherwise only
+    the public copies are reachable. The all-private-elsewhere fallback keeps
+    the edge (conservative) rather than dropping a dependency."""
+    candidates = by_name.get(ref, [])
+    if len(candidates) <= 1:
+        return [c.uid for c in candidates]
+    same = [c.uid for c in candidates if c.module == referrer.module]
+    if same:
+        return same
+    public = [c.uid for c in candidates if not c.is_private]
+    return public or [c.uid for c in candidates]
+
+
 def build_graph(root: Path, graph_path: Path | None = None) -> Graph:
     """Parse `root`'s .lean tree into a dep DAG: the tree supplies the nodes,
     `dep-graph.json` supplies every edge (or `graph_path`, to check `root`
@@ -539,13 +574,31 @@ def build_graph(root: Path, graph_path: Path | None = None) -> Graph:
     cone = load_cone(root, graph_path)
     known: set[str] = {d.full_name for d in decls}
 
+    # Graph identity: the user-facing name while it is unique, `name@module`
+    # once several modules declare it (`private` copies). No node is ever
+    # evicted by a same-named one.
+    counts = Counter(d.full_name for d in decls)
+    for d in decls:
+        d.uid = d.full_name if counts[d.full_name] == 1 else f"{d.full_name}@{d.module}"
+    by_name: dict[str, list[Decl]] = defaultdict(list)
+    for d in decls:
+        by_name[d.full_name].append(d)
+
     for d in decls:
         cone_refs = _cone_refs_for(d, cone, known)
         if cone_refs is not None:
-            d.refs = cone_refs
+            seen: set[str] = set()
+            uids: list[str] = []
+            for ref in cone_refs:
+                for uid in _resolve_ref_uids(ref, d, by_name):
+                    if uid == d.uid or uid in seen:
+                        continue
+                    seen.add(uid)
+                    uids.append(uid)
+            d.refs = uids
             d.refs_covered = True
 
-    by_full: dict[str, Decl] = {d.full_name: d for d in decls}
+    by_full: dict[str, Decl] = {d.uid: d for d in decls}
     _inject_sorry_virtual(by_full, decls)
     rev = _build_rev(by_full)
     for name in _sorry_reachable(by_full, rev):
@@ -571,10 +624,10 @@ def used_split(g: Graph, roots: set[str]) -> tuple[list[Decl], list[Decl]]:
     The virtual `sorry` node is excluded; both halves sorted by (file, line)."""
     used = _bfs(roots, lambda n: d.refs if (d := g.by_full.get(n)) else ())
     used.discard("sorry")  # virtual node, never a real decl
-    real = [d for d in g.decls if d.full_name != "sorry"]
+    real = [d for d in g.decls if d.uid != "sorry"]
     return (
-        sorted((d for d in real if d.full_name in used), key=by_file_line),
-        sorted((d for d in real if d.full_name not in used), key=by_file_line),
+        sorted((d for d in real if d.uid in used), key=by_file_line),
+        sorted((d for d in real if d.uid not in used), key=by_file_line),
     )
 
 
@@ -766,7 +819,7 @@ def fmt_rdeps(start: str, g: Graph) -> str:
 def fmt_dag(g: Graph, included: set[str] | None = None) -> str:
     lines: list[str] = []
     for d in sorted(g.decls, key=lambda x: x.full_name):
-        if included is not None and d.full_name not in included:
+        if included is not None and d.uid not in included:
             continue
         refs = sorted(set(d.refs) if included is None else (set(d.refs) & included))
         if refs:
@@ -778,12 +831,12 @@ def fmt_dag(g: Graph, included: set[str] | None = None) -> str:
 
 
 def fmt_sorry_paths(g: Graph) -> str:
-    direct_sorry = [d for d in g.by_full.values() if d.has_sorry and d.full_name != "sorry"]
+    direct_sorry = [d for d in g.by_full.values() if d.has_sorry and d.uid != "sorry"]
 
     lines = [bold("=== Sorry-blocked dependency paths ==="), ""]
     entries: list[tuple[int, str]] = []
     for sd in sorted(direct_sorry, key=lambda x: (x.file, x.line)):
-        rdeps = reverse_deps(sd.full_name, g.rev)
+        rdeps = reverse_deps(sd.uid, g.rev)
         entries.append((len(rdeps) - 1, sd.full_name + f"  ({sd.file}:{sd.line})"))
 
     for count, desc in sorted(entries, key=lambda x: -x[0]):
@@ -804,7 +857,7 @@ def fmt_orphans(g: Graph) -> str:
     referenced: set[str] = set()
     for d in g.decls:
         referenced.update(d.refs)
-    orphans = [d for d in g.decls if d.full_name not in referenced]
+    orphans = [d for d in g.decls if d.uid not in referenced]
 
     main_theorems: list[Decl] = []
     sorry_orphans: list[Decl] = []
@@ -838,28 +891,28 @@ def fmt_dot(g: Graph, subgraph: str | None) -> str:
     if subgraph:
         included = transitive_deps(subgraph, g.by_full)
     else:
-        included = {d.full_name for d in g.decls}
+        included = {d.uid for d in g.decls}
 
     def node_id(name: str) -> str:
         return '"' + name.replace('"', '\\"').replace(".", "_") + '"'
 
-    def short(name: str) -> str:
-        return name.split(".")[-1]
+    def short(d: Decl) -> str:
+        return d.full_name.split(".")[-1]
 
     dot = ["digraph deps {", "  rankdir=LR;", "  node [shape=box fontsize=9];", ""]
     for d in g.decls:
-        if d.full_name not in included:
+        if d.uid not in included:
             continue
         color = "red" if d.has_sorry else "orange" if d.tainted else "lightblue"
-        label = f"{short(d.full_name)}\\n{d.file}:{d.line}"
-        dot.append(f'  {node_id(d.full_name)} [label="{label}" style=filled fillcolor={color}];')
+        label = f"{short(d)}\\n{d.file}:{d.line}"
+        dot.append(f'  {node_id(d.uid)} [label="{label}" style=filled fillcolor={color}];')
     dot.append("")
     for d in g.decls:
-        if d.full_name not in included:
+        if d.uid not in included:
             continue
         for ref in d.refs:
             if ref in included and ref in g.by_full:
-                dot.append(f"  {node_id(d.full_name)} -> {node_id(ref)};")
+                dot.append(f"  {node_id(d.uid)} -> {node_id(ref)};")
     dot.append("}")
     return "\n".join(dot)
 
@@ -867,12 +920,14 @@ def fmt_dot(g: Graph, subgraph: str | None) -> str:
 def fmt_json(g: Graph, included: set[str] | None = None) -> str:
     data = []
     for d in g.decls:
-        if included is not None and d.full_name not in included:
+        if included is not None and d.uid not in included:
             continue
         refs = d.refs if included is None else sorted(set(d.refs) & included)
         data.append(
             {
                 "name": d.full_name,
+                "uid": d.uid,
+                "module": d.module,
                 "short_name": d.name,
                 "file": d.file,
                 "line": d.line,
@@ -889,10 +944,16 @@ def fmt_json(g: Graph, included: set[str] | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def match_names(query: str, names: Iterable[str]) -> list[str]:
-    """Exact full-name matches plus every name ending in `.query` — the one
-    resolution rule `reach`/`dead` roots and `from`/`direct`/`rdeps` share."""
-    return [n for n in names if n == query or n.endswith("." + query)]
+def match_uids(query: str, decls: Iterable[Decl]) -> list[str]:
+    """Graph uids whose user-facing name matches `query`: exact uid, exact
+    full name, or `.query` suffix on the full name. A name declared in several
+    modules yields every copy's uid — the caller reports the ambiguity rather
+    than picking one."""
+    return [
+        d.uid
+        for d in decls
+        if query == d.uid or query == d.full_name or d.full_name.endswith("." + query)
+    ]
 
 
 def reach_roots(g: Graph, names: list[str], root_files: list[str], root: Path) -> set[str]:
@@ -909,7 +970,7 @@ def reach_roots(g: Graph, names: list[str], root_files: list[str], root: Path) -
         for d in g.decls:
             f = d.file
             if f in norm or any(f == rf or f.endswith("/" + rf) for rf in norm):
-                roots.add(d.full_name)
+                roots.add(d.uid)
     if not names and not root_files:
         names = sorted(roots_from_configs(root))
         if names:
@@ -918,7 +979,7 @@ def reach_roots(g: Graph, names: list[str], root_files: list[str], root: Path) -
                 file=sys.stderr,
             )
     for nm in names:
-        matched = match_names(nm, (d.full_name for d in g.decls))
+        matched = match_uids(nm, g.decls)
         if not matched:
             print(f"note: reach root '{nm}' matched no declaration", file=sys.stderr)
         roots.update(matched)
@@ -950,7 +1011,7 @@ def fmt_reach(
         return {
             **_row(d),
             "sorry_tainted": d.tainted,
-            "is_root": d.full_name in roots,
+            "is_root": d.uid in roots,
             "n_refs": len(d.refs),
         }
 
@@ -1032,7 +1093,7 @@ def fmt_dead(
     with LOC span and reachability flags. Writes JSONL to `out` when given;
     always returns a summary."""
     used_decls, unused_decls = used_split(g, roots)
-    unused_names = {d.full_name for d in unused_decls}
+    unused_names = {d.uid for d in unused_decls}
 
     if closure:
         dead_names = _dead_closure(unused_names, g.rev)
@@ -1042,7 +1103,7 @@ def fmt_dead(
             referenced.update(d.refs)
         dead_names = {n for n in unused_names if n not in referenced}
 
-    dead_decls = [d for d in unused_decls if d.full_name in dead_names]
+    dead_decls = [d for d in unused_decls if d.uid in dead_names]
     confirmed = [d for d in dead_decls if not d.implicit_reach]
     suspects = [d for d in dead_decls if d.implicit_reach]
 
@@ -1099,10 +1160,10 @@ def fmt_dead(
 
 
 def resolve_or_die(query: str, g: Graph) -> str:
-    """Return resolved full_name, or print candidates / not-found and exit."""
-    candidates = match_names(query, g.by_full)
+    """Return resolved uid, or print candidates / not-found and exit."""
+    candidates = match_uids(query, g.decls)
     if not candidates:
-        candidates = [n for n in g.by_full if query.lower() in n.lower()]
+        candidates = [uid for uid in g.by_full if query.lower() in uid.lower()]
     if len(candidates) == 1:
         return candidates[0]
     if len(candidates) > 1:
@@ -1265,22 +1326,6 @@ def _add_dead_options(p_dead: argparse.ArgumentParser) -> None:
     )
 
 
-def _warn_duplicates(g: Graph) -> list[str]:
-    seen: dict[str, str] = {}
-    warnings: list[str] = []
-    for d in g.decls:
-        loc = f"{d.file}:{d.line}"
-        if d.full_name in seen:
-            warnings.append(
-                f"duplicate declaration '{d.full_name}' in "
-                f"{seen[d.full_name]} and {loc} "
-                "(sorry-taint may be inaccurate)"
-            )
-        else:
-            seen[d.full_name] = loc
-    return warnings
-
-
 # Each subcommand is one handler returning its exit code; `_make_parser`
 # attaches the right one to its subparser, so the command names are enumerated
 # once rather than again in a dispatch cascade.
@@ -1405,12 +1450,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     g = build_graph(root)
     if not g.decls and next(iter_lean_files(root), None) is None:
         exit_no_lean_files(root)
-
-    # Before the command runs: a handler may exit (a CI gate, an unresolvable
-    # name), and a warning that the graph itself is ambiguous must not be lost
-    # with it.
-    for w in _warn_duplicates(g):
-        print(dim(f"note: {w}"), file=sys.stderr)
 
     handler: Handler = args.handler
     return handler(args, g, root)
