@@ -8,11 +8,14 @@ They are stdlib-only, and they find the project themselves (the nearest
 lakefile, walking up) — `--project DIR` on any command names one instead.
 
 They never modify your Lean sources, but they are not read-only: `review-cone`
-and `dep-graph` emit their JSON next to the project (running `lake build`
+and `emit-refs` emit their JSON next to the project (running `lake build`
 first, unless `--no-build`), `build-times` writes `module_build_times.jsonl`
-and drives `lake`, and `dep-tree dead` writes `dead_candidates.jsonl` into the
+and drives `lake`, and `refs show dead` writes `dead_candidates.jsonl` into the
 current directory. Every output path is overridable. Each command's `--help`
 is the authoritative list of its options; the sections below give the shape.
+
+Chain: first `lake build`, then `lean4-lens emit-refs --no-build`, then
+`lean4-lens refs check data-complete`.
 
 ## Install
 
@@ -24,11 +27,14 @@ uv tool install /path/to/lean4-lens     # or: uv run --project /path/to/lean4-le
 
 ```
 lean4-lens review-cone     render the review cone as a standalone HTML document
-lean4-lens dep-graph       emit dep-graph.json, the data `dep-tree` reads
-lean4-lens dep-tree        query the dependency graph: reachability, taint, dead code
+lean4-lens emit-refs       emit dep-graph.json, the data `refs` reads
+lean4-lens refs            query the proof references: check gates, shows, exports
 lean4-lens heavy-tactics   where the expensive tactics are used
 lean4-lens build-times     per-module build time for a library
 ```
+
+`dep-graph` and `dep-tree` stay as aliases of `emit-refs` and `refs` for one
+release.
 
 ### review-cone
 
@@ -41,38 +47,42 @@ document: every project reference an internal link, every mathlib reference a
 link to the mathlib4 docs. `--json FILE` re-renders JSON emitted earlier and
 skips the Lean run entirely.
 
-### dep-graph
+### emit-refs
 
 Runs the same Lean emitter but writes `dep-graph.json`: every project
 declaration with the declarations its proof refers to. That file is what
-`dep-tree` reads.
+`refs` reads.
 
-### dep-tree
+### refs
 
-Answers dependency questions over `dep-graph.json`, one subcommand each:
+Answers proof-reference questions over `dep-graph.json`:
 
 ```
-summary       counts + listings, and the CI gates
-coverage      does the committed graph still describe the code?
-reach         split every decl into used / unused, from a set of roots
-dead          dead-code candidates: unreachable *and* referenced by nothing live
-orphans       unreferenced decls (entry points, or dead)
-sorry-paths   direct-sorry decls ranked by how much they block
-rdeps         transitive reverse-deps of one decl
-from          transitive deps of one decl
-direct        immediate refs of one decl
-dag           the whole DAG as `Name: dep1 dep2 …` lines
-dot           GraphViz DOT, optionally the subgraph from one decl
-json          the whole graph as JSON
+check data-complete   does the committed graph still describe the code?
+check taint-status    counts + listings, and the CI gates
+show direct-deps      immediate refs of one decl
+show deps             transitive deps of one decl
+show used-by          transitive reverse-deps of one decl
+show reach            split every decl into used / unused, from a set of roots
+show dead             dead-code candidates: unreachable *and* referenced by nothing live
+show sorry-impact     direct-sorry decls ranked by how much they block
+export                the whole graph as JSON, DOT, or text
 ```
 
-`reach` and `dead` take root declarations as arguments, or `--root-file PATH`
+`show dead --global` lists globally unreferenced decls (the old `orphans`
+question). `export --format json|dot|text` merges the old `json` / `dot` /
+`dag` outputs; `--from NAME` limits any format to one decl's cone. The old
+flat names (`summary`, `coverage`, `from`, `direct`, `rdeps`, `dag`, `dot`,
+`json`, `reach`, `dead`, `sorry-paths`, `orphans`) stay as hidden aliases for
+one release.
+
+`reach` and `show dead` take root declarations as arguments, or `--root-file PATH`
 for every decl in a file; with neither they fall back to the roots named in the
 project's `review-cone*.toml`. Both can write their split as JSONL
-(`--out-used` / `--out-unused`). `dead` writes `dead_candidates.jsonl` by
+(`--out-used` / `--out-unused`). `show dead` writes `dead_candidates.jsonl` by
 default (`--out` redirects it, `--no-out` skips it) and takes `--closure` for
 the whole removable set in one pass, rather than only the globally-orphaned
-decls.
+decls, plus `--global` to ignore roots entirely.
 
 References come from the elaborator only. A declaration the data misses gets no
 edges and is reported, never guessed at.
@@ -133,7 +143,7 @@ toc = false
 
 A project may keep several review documents: every `review-cone*.toml` is a
 config in its own right (`--config` selects one), each emitting JSON and HTML
-named after itself. `dep-tree`'s default roots are the union of them all.
+named after itself. `refs`' default roots are the union of them all.
 
 `lean4-lens.toml` says which files count as project code. Build trees and
 dot-directories are always skipped, so most projects need nothing here.
@@ -179,7 +189,7 @@ cd tests/lean-v4.33.0 && lake build
 An unbuilt one skips (building it would make pytest download a toolchain), so a
 fresh clone runs the fast tests and nothing else. Adding a version means copying
 a directory and editing its `lean-toolchain`; regenerate its committed
-`dep-graph.json` with `lean4-lens dep-graph` from inside it.
+`dep-graph.json` with `lean4-lens emit-refs` from inside it.
 
 To point the same tests at a real project instead of the fixtures:
 

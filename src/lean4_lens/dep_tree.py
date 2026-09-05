@@ -1,13 +1,18 @@
-"""Dependency tree between Lean declarations.
+"""Proof references between Lean declarations.
 
 Scans the project's .lean files (see `lean4-lens.toml`), extracts theorem/lemma/def
 decls, and builds a forward dep DAG. A declaration is "sorry-tainted" iff it
 transitively depends on a direct `sorry` (comments and strings stripped first).
 
 References come from exactly one source: the **elaborator**, via the `refs`
-field of `dep-graph.json` (written by `lean4-lens dep-graph`). There is no
+field of `dep-graph.json` (written by `lean4-lens emit-refs`). There is no
 text-matching fallback — a decl absent from the data gets no edges and is
-reported by `coverage`, never guessed at.
+reported by `check data-complete`, never guessed at.
+
+Chain: first `lake build`, then `lean4-lens emit-refs --no-build`, then
+`lean4-lens refs ...`. Missing data yields zero edges and is reported, never
+guessed. Old names (`dep-tree` for the command, flat subcommands such as
+`summary`/`coverage`/`from`) stay as aliases for one release.
 
 Status glyphs in listings:
   ✓ clean (sorry-free, no tainted deps)
@@ -15,22 +20,21 @@ Status glyphs in listings:
   ? sorry-tainted via deps
   A stated `axiom` — an unproven assumption
 
-Subcommands:
-  summary               Counts + listings. --fail-on-sorry / --fail-on-axioms
-                        exit 1 on findings, so the report can gate CI.
-  coverage [--list]     Check `dep-graph.json` describes every declaration in
-                        the source — total coverage is what the other commands
-                        assume. Counts the stragglers per file, or names them
-                        with --list. Exits 1 on stale data (cure:
-                        `lean4-lens dep-graph`), 0 on files no library imports (cure:
-                        import the file, or delete it).
-  from NAME             Transitive deps of NAME as lean names.
-  direct NAME           Immediate refs of NAME.
-  rdeps NAME            Transitive reverse-deps.
-  dag                   Full DAG: 'Name: dep1 dep2 ...' lines.
-  dot [NAME]            GraphViz DOT (subgraph from NAME if given).
-  json                  Full graph as JSON.
-  reach [NAME...]       Split every decl into "used" (transitively feeds
+Groups:
+  check                 Data and health gates.
+    data-complete [--list]  Check `dep-graph.json` describes every declaration
+                            in the source — total coverage is what the other
+                            commands assume. Counts the stragglers per file, or
+                            names them with --list. Exits 1 on stale data (cure:
+                            `lean4-lens emit-refs`), 0 on files no library
+                            imports (cure: import the file, or delete it).
+    taint-status            Counts + listings. --fail-on-sorry / --fail-on-axioms
+                            exit 1 on findings, so the report can gate CI.
+  show                  Human questions over the graph.
+    direct-deps NAME    Immediate refs of NAME.
+    deps NAME           Transitive deps of NAME as lean names.
+    used-by NAME        Transitive reverse-deps.
+    reach [NAME...]     Split every decl into "used" (transitively feeds
                         into a root) vs "unused". Roots = NAME args and/or
                         every decl in a --root-file; with neither, default to
                         the roots listed in every `review-cone*.toml`. Uses a
@@ -38,22 +42,27 @@ Subcommands:
                         ambiguous names, so a decl reported unused genuinely
                         never feeds a root. --out-used / --out-unused write
                         JSONL; else a summary.
-  sorry-paths           Direct-sorry decls ranked by # downstream blocked.
-  orphans               Unreferenced decls (entry points or dead).
-  dead [NAME...]        Dead-code candidates = unreachable from roots (as in
+    dead [NAME...]      Dead-code candidates = unreachable from roots (as in
                         `reach`) AND referenced by zero *live* decls. Default:
                         globally orphaned (conservative — a dead helper still
                         called from another dead decl is withheld until its
                         caller goes). --closure reports the full removable set
-                        in one pass (dead if every referrer is dead). Rows are
-                        split into confirmed (plain theorem/def — safe) vs
-                        suspects (@[simp]/instance/… reachable via elaboration —
+                        in one pass (dead if every referrer is dead). --global
+                        ignores roots and lists globally unreferenced decls
+                        (the old `orphans` question). Rows are split into
+                        confirmed (plain theorem/def — safe) vs suspects
+                        (@[simp]/instance/… reachable via elaboration —
                         verify first), grouped by file, annotated with LOC span
                         and reachability flags. Same root args as `reach`
                         (default: roots from every `review-cone*.toml`). --out
                         (default dead_candidates.jsonl; --no-out to skip) writes
                         JSONL for both buckets (filter on `implicit_reach`);
                         --out-used / --out-unused also available as in `reach`.
+    sorry-impact        Direct-sorry decls ranked by # downstream blocked.
+  export --format json|dot|text [--from NAME]
+                        The whole graph for other tools: json (machines), dot
+                        (GraphViz), text (`Name: dep1 dep2 ...` lines). --from
+                        limits the output to one decl's cone.
 
 Common options (all subcommands):
   --project=DIR         Lean project root (default: nearest lakefile from the CWD).
@@ -61,7 +70,7 @@ Common options (all subcommands):
 Every subcommand exits 2 when the scan finds no project .lean files at all —
 a gate that scanned nothing must not pass as clean.
 
-Name resolution for from/direct/rdeps:
+Name resolution for direct-deps/deps/used-by:
 exact full_name, then suffix match on '.NAME', then case-insensitive
 substring.
 """
@@ -634,7 +643,7 @@ def fmt_coverage(g: Graph, show_names: bool = False) -> str:
     a standing condition this prints on every graph rebuild, so they are
     counted per file unless `show_names` — a wall of names buries the ask."""
     if g.cone is None:
-        return red(f"✗ no {DEP_GRAPH_NAME}") + dim("  — every decl reports zero deps. Run: lean4-lens dep-graph")
+        return red(f"✗ no {DEP_GRAPH_NAME}") + dim("  — every decl reports zero deps. Run: lean4-lens emit-refs")
 
     stale, uncompiled = uncovered(g)
     total = len(g.decls)
@@ -656,7 +665,7 @@ def fmt_coverage(g: Graph, show_names: bool = False) -> str:
             *_group_by_file(stale),
             "",
             dim("  Fix: if the source changed since the data was written, re-run"),
-            dim("  `lean4-lens dep-graph`. If a re-run leaves the same names here, the data"),
+            dim("  `lean4-lens emit-refs`. If a re-run leaves the same names here, the data"),
             dim("  is current and the mismatch is in the name: Lean registered this decl"),
             dim("  under a name this parser did not derive from the source. Then read the"),
             dim("  entries this file lists for that module and correct whichever side is"),
@@ -693,7 +702,7 @@ def _staleness_banner(g: Graph) -> list[str]:
     if stale:
         out += [
             red(f"⚠ {len(stale)} declaration(s) are missing from {DEP_GRAPH_NAME} — it is stale."),
-            red("  Counts below understate deps and taint. Run: lean4-lens dep-graph"),
+            red("  Counts below understate deps and taint. Run: lean4-lens emit-refs"),
         ]
     if uncompiled:
         out.append(
@@ -754,12 +763,15 @@ def fmt_rdeps(start: str, g: Graph) -> str:
     return "\n".join(lines)
 
 
-def fmt_dag(g: Graph) -> str:
+def fmt_dag(g: Graph, included: set[str] | None = None) -> str:
     lines: list[str] = []
     for d in sorted(g.decls, key=lambda x: x.full_name):
-        if d.refs:
+        if included is not None and d.full_name not in included:
+            continue
+        refs = sorted(set(d.refs) if included is None else (set(d.refs) & included))
+        if refs:
             shown = f"{d.full_name} (axiom)" if d.is_axiom else d.full_name
-            lines.append(f"{shown}: {' '.join(sorted(set(d.refs)))}")
+            lines.append(f"{shown}: {' '.join(refs)}")
         else:
             lines.append(fmt_decl_line(d, include_location=False))
     return "\n".join(lines)
@@ -852,9 +864,12 @@ def fmt_dot(g: Graph, subgraph: str | None) -> str:
     return "\n".join(dot)
 
 
-def fmt_json(g: Graph) -> str:
+def fmt_json(g: Graph, included: set[str] | None = None) -> str:
     data = []
     for d in g.decls:
+        if included is not None and d.full_name not in included:
+            continue
+        refs = d.refs if included is None else sorted(set(d.refs) & included)
         data.append(
             {
                 "name": d.full_name,
@@ -863,7 +878,7 @@ def fmt_json(g: Graph) -> str:
                 "line": d.line,
                 "has_sorry": d.has_sorry,
                 "sorry_tainted": d.tainted,
-                "refs": d.refs,
+                "refs": refs,
             }
         )
     return json.dumps(data, indent=2)
@@ -1124,47 +1139,111 @@ def _make_parser() -> argparse.ArgumentParser:
     roots_common.add_argument("--out-unused", type=Path, default=None, help="Write unused decls as JSONL here.")
 
     p = argparse.ArgumentParser(
-        prog="lean4-lens dep-tree",
-        description="Dependency tree between Lean declarations.",
+        prog="lean4-lens refs",
+        description="Proof references between Lean declarations: gates, shows, exports.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="check|show|export")
 
-    p_sum = sub.add_parser("summary", parents=[common], help="Counts + listings.")
-    p_sum.set_defaults(handler=_cmd_summary)
-    p_sum.add_argument("--fail-on-sorry", action="store_true", help="Exit 1 if any decl has a direct sorry.")
-    p_sum.add_argument("--fail-on-axioms", action="store_true", help="Exit 1 if any decl is a stated axiom.")
-    p_cov = sub.add_parser(
-        "coverage", parents=[common], help=f"Check {DEP_GRAPH_NAME} covers every decl. Exits 1 if not."
+    # ---- check: data and health gates ----
+    p_check = sub.add_parser("check", help="Data and health gates.")
+    check_sub = p_check.add_subparsers(dest="check_cmd", required=True)
+    p_dc = check_sub.add_parser(
+        "data-complete", parents=[common], help=f"Check {DEP_GRAPH_NAME} covers every decl. Exits 1 if not."
     )
-    p_cov.set_defaults(handler=_cmd_coverage)
-    p_cov.add_argument(
+    p_dc.set_defaults(handler=_cmd_coverage)
+    p_dc.add_argument(
         "--list", action="store_true", help="Name the decls in never-imported files (default: count per file)."
     )
-    p_from = sub.add_parser("from", parents=[common], help="Transitive deps as lean names.")
-    p_from.set_defaults(handler=_cmd_from)
-    p_from.add_argument("name")
-    p_direct = sub.add_parser("direct", parents=[common], help="Immediate refs.")
-    p_direct.set_defaults(handler=_cmd_direct)
-    p_direct.add_argument("name")
-    p_rdeps = sub.add_parser("rdeps", parents=[common], help="Transitive reverse-deps.")
-    p_rdeps.set_defaults(handler=_cmd_rdeps)
-    p_rdeps.add_argument("name")
-    sub.add_parser("dag", parents=[common], help="Full DAG.").set_defaults(handler=_cmd_dag)
-    p_dot = sub.add_parser("dot", parents=[common], help="GraphViz DOT.")
-    p_dot.set_defaults(handler=_cmd_dot)
-    p_dot.add_argument("name", nargs="?", default=None)
-    sub.add_parser("json", parents=[common], help="Full graph as JSON.").set_defaults(handler=_cmd_json)
-    sub.add_parser(
+    p_ts = check_sub.add_parser("taint-status", parents=[common], help="Counts + listings.")
+    p_ts.set_defaults(handler=_cmd_summary)
+    p_ts.add_argument("--fail-on-sorry", action="store_true", help="Exit 1 if any decl has a direct sorry.")
+    p_ts.add_argument("--fail-on-axioms", action="store_true", help="Exit 1 if any decl is a stated axiom.")
+
+    # ---- show: human questions ----
+    p_show = sub.add_parser("show", help="Human questions over the graph.")
+    show_sub = p_show.add_subparsers(dest="show_cmd", required=True)
+    p_dd = show_sub.add_parser("direct-deps", parents=[common], help="Immediate refs of one declaration.")
+    p_dd.set_defaults(handler=_cmd_direct)
+    p_dd.add_argument("name")
+    p_deps = show_sub.add_parser("deps", parents=[common], help="Transitive deps of one declaration as lean names.")
+    p_deps.set_defaults(handler=_cmd_from)
+    p_deps.add_argument("name")
+    p_ub = show_sub.add_parser("used-by", parents=[common], help="Transitive reverse-deps of one declaration.")
+    p_ub.set_defaults(handler=_cmd_rdeps)
+    p_ub.add_argument("name")
+    show_sub.add_parser(
         "reach", parents=[common, roots_common], help="Used/unused split from root decls/files."
     ).set_defaults(handler=_cmd_reach)
-    sub.add_parser("sorry-paths", parents=[common], help="Direct-sorry decls ranked by blast radius.").set_defaults(
+    p_sdead = show_sub.add_parser(
+        "dead", parents=[common, roots_common], help="unused ∩ orphans — dead-code candidates."
+    )
+    p_sdead.set_defaults(handler=_cmd_dead)
+    _add_dead_options(p_sdead)
+    show_sub.add_parser(
+        "sorry-impact", parents=[common], help="Direct-sorry decls ranked by blast radius."
+    ).set_defaults(handler=_cmd_sorry_paths)
+
+    # ---- export: machine output ----
+    p_export = sub.add_parser("export", parents=[common], help="The whole graph for other tools.")
+    p_export.set_defaults(handler=_cmd_export)
+    p_export.add_argument(
+        "--format",
+        required=True,
+        choices=("json", "dot", "text"),
+        help="json (machines), dot (GraphViz), text (`Name: dep1 dep2 ...` lines).",
+    )
+    p_export.add_argument(
+        "--from",
+        dest="from_name",
+        default=None,
+        metavar="NAME",
+        help="Limit the output to one declaration's cone (default: the full graph).",
+    )
+
+    # ---- hidden flat aliases (one release): every old name still resolves ----
+    a_sum = sub.add_parser("summary", parents=[common], help=argparse.SUPPRESS)
+    a_sum.set_defaults(handler=_cmd_summary)
+    a_sum.add_argument("--fail-on-sorry", action="store_true", help=argparse.SUPPRESS)
+    a_sum.add_argument("--fail-on-axioms", action="store_true", help=argparse.SUPPRESS)
+    a_cov = sub.add_parser("coverage", parents=[common], help=argparse.SUPPRESS)
+    a_cov.set_defaults(handler=_cmd_coverage)
+    a_cov.add_argument("--list", action="store_true", help=argparse.SUPPRESS)
+    a_from = sub.add_parser("from", parents=[common], help=argparse.SUPPRESS)
+    a_from.set_defaults(handler=_cmd_from)
+    a_from.add_argument("name")
+    a_direct = sub.add_parser("direct", parents=[common], help=argparse.SUPPRESS)
+    a_direct.set_defaults(handler=_cmd_direct)
+    a_direct.add_argument("name")
+    a_rdeps = sub.add_parser("rdeps", parents=[common], help=argparse.SUPPRESS)
+    a_rdeps.set_defaults(handler=_cmd_rdeps)
+    a_rdeps.add_argument("name")
+    sub.add_parser("dag", parents=[common], help=argparse.SUPPRESS).set_defaults(handler=_cmd_dag)
+    a_dot = sub.add_parser("dot", parents=[common], help=argparse.SUPPRESS)
+    a_dot.set_defaults(handler=_cmd_dot)
+    a_dot.add_argument("name", nargs="?", default=None)
+    sub.add_parser("json", parents=[common], help=argparse.SUPPRESS).set_defaults(handler=_cmd_json)
+    sub.add_parser("reach", parents=[common, roots_common], help=argparse.SUPPRESS).set_defaults(
+        handler=_cmd_reach
+    )
+    sub.add_parser("sorry-paths", parents=[common], help=argparse.SUPPRESS).set_defaults(
         handler=_cmd_sorry_paths
     )
-    sub.add_parser("orphans", parents=[common], help="Unreferenced decls.").set_defaults(handler=_cmd_orphans)
-    p_dead = sub.add_parser("dead", parents=[common, roots_common], help="unused ∩ orphans — dead-code candidates.")
-    p_dead.set_defaults(handler=_cmd_dead)
+    sub.add_parser("orphans", parents=[common], help=argparse.SUPPRESS).set_defaults(handler=_cmd_orphans)
+    a_dead = sub.add_parser("dead", parents=[common, roots_common], help=argparse.SUPPRESS)
+    a_dead.set_defaults(handler=_cmd_dead)
+    _add_dead_options(a_dead)
+
+    # Hidden aliases stay resolvable but out of the help listing, so `--help`
+    # shows the new surface only.
+    sub._choices_actions = [a for a in sub._choices_actions if a.help != argparse.SUPPRESS]
+
+    return p
+
+
+def _add_dead_options(p_dead: argparse.ArgumentParser) -> None:
+    """The options `show dead` and its flat `dead` alias share."""
     p_dead.add_argument(
         "--out",
         type=Path,
@@ -1178,8 +1257,12 @@ def _make_parser() -> argparse.ArgumentParser:
         help="Report the full dead closure (a decl is dead if every referrer is dead), "
         "not just globally-orphaned decls — the whole removable set in one pass.",
     )
-
-    return p
+    p_dead.add_argument(
+        "--global",
+        dest="global_",
+        action="store_true",
+        help="Ignore roots and list globally unreferenced decls (the old `orphans` question).",
+    )
 
 
 def _warn_duplicates(g: Graph) -> list[str]:
@@ -1238,6 +1321,24 @@ def _cmd_json(args: argparse.Namespace, g: Graph, root: Path) -> int:
     return 0
 
 
+def _cmd_export(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    """One export command for machines, GraphViz, and humans — the old `json`,
+    `dot`, and `dag` outputs, optionally limited to one decl's cone."""
+    if args.from_name is not None:
+        start = resolve_or_die(args.from_name, g)
+        included = transitive_deps(start, g.by_full)
+    else:
+        start = None
+        included = None
+    if args.format == "json":
+        print(fmt_json(g, included))
+    elif args.format == "dot":
+        print(fmt_dot(g, subgraph=start))
+    else:
+        print(fmt_dag(g, included))
+    return 0
+
+
 def _cmd_reach(args: argparse.Namespace, g: Graph, root: Path) -> int:
     roots = _resolve_roots(args, g, root, "reach")
     if roots is None:
@@ -1257,6 +1358,12 @@ def _cmd_orphans(args: argparse.Namespace, g: Graph, root: Path) -> int:
 
 
 def _cmd_dead(args: argparse.Namespace, g: Graph, root: Path) -> int:
+    if args.global_:
+        # The old `orphans` question: globally unreferenced decls, roots ignored.
+        if args.name or args.root_file or args.closure:
+            print("note: --global ignores roots and --closure", file=sys.stderr)
+        print(fmt_orphans(g))
+        return 0
     roots = _resolve_roots(args, g, root, "dead")
     if roots is None:
         return 1

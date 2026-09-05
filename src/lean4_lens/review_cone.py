@@ -32,8 +32,8 @@ Usage:
     lean4-lens review-cone --json cone.json         # render an existing JSON, skip the Lean run
     lean4-lens review-cone --no-build --toc-support --out out.html --title "My Formalization"
 
-`lean4-lens dep-graph` shares this file's Lean emitter to write `dep-graph.json`
-for `lean4-lens dep-tree` — data, not a document.
+`lean4-lens emit-refs` shares this file's Lean emitter to write `dep-graph.json`
+for `lean4-lens refs` — data, not a document.
 """
 
 from __future__ import annotations
@@ -1061,11 +1061,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def dep_graph_main(argv: Sequence[str] | None = None) -> int:
-    """CLI for `lean4-lens dep-graph`: run the same Lean emitter in dependency
-    mode — every project decl with its proof refs — for `lean4-lens dep-tree`."""
+    """CLI for `lean4-lens emit-refs` (alias `dep-graph` for one release): run
+    the same Lean emitter in dependency mode — every project decl with its
+    proof refs — for `lean4-lens refs`."""
     ap = argparse.ArgumentParser(
-        prog="lean4-lens dep-graph",
-        description=f"Emit {DEP_GRAPH_NAME} — every project decl with its proof refs — for `lean4-lens dep-tree`.",
+        prog="lean4-lens emit-refs",
+        description=(
+            f"Emit {DEP_GRAPH_NAME} — every project decl with its proof refs — "
+            "for `lean4-lens refs`. Chain: `lake build`, then `emit-refs --no-build`, "
+            "then `refs check data-complete`."
+        ),
     )
     ap.add_argument(
         "--project", type=Path, default=None, help="Lean project root (default: nearest lakefile from the CWD)."
@@ -1080,7 +1085,7 @@ def dep_graph_main(argv: Sequence[str] | None = None) -> int:
         ap.error("`lake` not found on PATH — build tooling required")
     project_root = resolve_root_or_exit(args.project)
 
-    cli.heading("DEP GRAPH")
+    cli.heading("EMIT REFS")
     libs = read_lib_names(project_root)
     if not libs:
         print(cli.red("✗ no lean_lib found in the lakefile"), file=sys.stderr)

@@ -1239,6 +1239,172 @@ class _EmitterTests(_MixinBase):
         self.assertEqual(before - after, set(), "declarations lost their taint")
 
 
+# ---------------------------------------------------------------------------
+# P. Self-explanatory dep surface: emit-refs/refs with check/show/export
+# ---------------------------------------------------------------------------
+# New names resolve, old flat names stay as aliases, export formats equal the
+# old outputs, `show dead --global` equals `orphans`, and the exit codes hold:
+# stale/missing data fail with 1, an empty scan exits 2. One seam only: the
+# reader main with a fake project root fed by fixture JSON data.
+
+
+def _small_tree(tmp_path: Path) -> Path:
+    return _write_lean_tree(
+        tmp_path,
+        {
+            "A.lean": (
+                "namespace P\ntheorem leaf : True :=\n  sorry\n"
+                "theorem mid : True :=\n  leaf\ntheorem top : True :=\n  mid\n"
+                "theorem lone : True :=\n  trivial\nend P\n"
+            ),
+        },
+        deps={
+            "P.leaf": ("A.lean", []),
+            "P.mid": ("A.lean", ["P.leaf"]),
+            "P.top": ("A.lean", ["P.mid"]),
+            "P.lone": ("A.lean", []),
+        },
+    )
+
+
+def _run(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
+    capsys.readouterr()
+    code = D.main(argv)
+    return code, capsys.readouterr().out
+
+
+def test_p1_check_data_complete_passes_on_full_cover(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _small_tree(tmp_path)
+    code, out = _run(["check", "data-complete", "--project", str(root)], capsys)
+    assert code == 0
+    assert "4 declarations covered" in out
+
+
+def test_p2_check_taint_status_reports_counts(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _small_tree(tmp_path)
+    code, out = _run(["check", "taint-status", "--project", str(root)], capsys)
+    assert code == 0
+    assert "Direct sorry:   1" in out
+    assert "Sorry-tainted:  2" in out
+    code, _ = _run(["check", "taint-status", "--project", str(root), "--fail-on-sorry"], capsys)
+    assert code == 1
+
+
+def test_p3_show_single_decl_queries(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _small_tree(tmp_path)
+    code, out = _run(["show", "direct-deps", "P.mid", "--project", str(root)], capsys)
+    assert code == 0
+    assert "P.leaf" in out
+    code, out = _run(["show", "deps", "P.top", "--project", str(root)], capsys)
+    assert code == 0
+    assert "P.leaf" in out and "P.mid" in out
+    code, out = _run(["show", "used-by", "P.leaf", "--project", str(root)], capsys)
+    assert code == 0
+    assert "P.top" in out
+
+
+def test_p4_show_whole_graph_queries(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _small_tree(tmp_path)
+    assert _run(["show", "reach", "P.top", "--project", str(root)], capsys)[0] == 0
+    assert _run(["show", "dead", "P.top", "--project", str(root), "--no-out"], capsys)[0] == 0
+    code, out = _run(["show", "sorry-impact", "--project", str(root)], capsys)
+    assert code == 0
+    assert "P.leaf" in out
+
+
+def test_p5_export_formats_resolve(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _small_tree(tmp_path)
+    for fmt in ("json", "dot", "text"):
+        assert _run(["export", "--format", fmt, "--project", str(root)], capsys)[0] == 0
+
+
+def test_p6_old_flat_aliases_still_resolve(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _small_tree(tmp_path)
+    assert _run(["summary", "--project", str(root)], capsys)[0] == 0
+    assert _run(["coverage", "--project", str(root)], capsys)[0] == 0
+    assert _run(["from", "P.top", "--project", str(root)], capsys)[0] == 0
+    assert _run(["direct", "P.mid", "--project", str(root)], capsys)[0] == 0
+    assert _run(["rdeps", "P.leaf", "--project", str(root)], capsys)[0] == 0
+    assert _run(["dag", "--project", str(root)], capsys)[0] == 0
+    assert _run(["dot", "--project", str(root)], capsys)[0] == 0
+    assert _run(["json", "--project", str(root)], capsys)[0] == 0
+    assert _run(["reach", "P.top", "--project", str(root)], capsys)[0] == 0
+    assert _run(["dead", "P.top", "--project", str(root), "--no-out"], capsys)[0] == 0
+    assert _run(["sorry-paths", "--project", str(root)], capsys)[0] == 0
+    assert _run(["orphans", "--project", str(root)], capsys)[0] == 0
+
+
+def test_p7_export_equals_old_outputs(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _small_tree(tmp_path)
+    _, old_dag = _run(["dag", "--project", str(root)], capsys)
+    _, new_text = _run(["export", "--format", "text", "--project", str(root)], capsys)
+    assert new_text == old_dag
+    _, old_dot = _run(["dot", "--project", str(root)], capsys)
+    _, new_dot = _run(["export", "--format", "dot", "--project", str(root)], capsys)
+    assert new_dot == old_dot
+    _, old_json = _run(["json", "--project", str(root)], capsys)
+    _, new_json = _run(["export", "--format", "json", "--project", str(root)], capsys)
+    assert json.loads(new_json) == json.loads(old_json)
+
+
+def test_p8_dead_global_equals_orphans(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _small_tree(tmp_path)
+    _, old = _run(["orphans", "--project", str(root)], capsys)
+    _, new = _run(["show", "dead", "--global", "--project", str(root), "--no-out"], capsys)
+    assert new == old
+
+
+def test_p9_stale_data_fails_data_complete(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _write_lean_tree(
+        tmp_path,
+        {"A.lean": "namespace P\ntheorem a : True :=\n  trivial\ntheorem b : True :=\n  trivial\nend P\n"},
+        deps={"P.a": ("A.lean", [])},
+    )
+    assert _run(["check", "data-complete", "--project", str(root)], capsys)[0] == 1
+
+
+def test_p10_missing_data_file_fails_data_complete(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _write_lean_tree(
+        tmp_path, {"A.lean": "namespace P\ntheorem a : True :=\n  trivial\nend P\n"}
+    )
+    assert _run(["check", "data-complete", "--project", str(root)], capsys)[0] == 1
+
+
+def test_p11_zero_files_exits_2_on_new_names(tmp_path: Path) -> None:
+    root = _write_lean_tree(tmp_path, {})
+    with pytest.raises(SystemExit) as e:
+        D.main(["check", "data-complete", "--project", str(root)])
+    assert e.value.code == 2
+    with pytest.raises(SystemExit) as e2:
+        D.main(["export", "--format", "json", "--project", str(root)])
+    assert e2.value.code == 2
+
+
+def test_p12_top_level_aliases_share_code_paths(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from lean4_lens.main import COMMANDS
+    from lean4_lens.main import main as top_main
+
+    assert set(("emit-refs", "refs", "dep-graph", "dep-tree")) <= set(COMMANDS)
+    # Writer contract: one code path, so the JSON shape cannot drift by name.
+    assert COMMANDS["emit-refs"][0] is COMMANDS["dep-graph"][0]
+    assert COMMANDS["refs"][0] is COMMANDS["dep-tree"][0]
+    root = _small_tree(tmp_path)
+    capsys.readouterr()
+    assert top_main(["refs", "check", "data-complete", "--project", str(root)]) == 0
+    capsys.readouterr()
+    assert top_main(["dep-tree", "coverage", "--project", str(root)]) == 0
+
+
+def test_p13_export_from_limits_to_cone(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _small_tree(tmp_path)
+    _, out = _run(["export", "--format", "text", "--from", "P.top", "--project", str(root)], capsys)
+    assert "P.top" in out
+    assert "P.lone" not in out
+    _, old_dot = _run(["dot", "P.top", "--project", str(root)], capsys)
+    _, new_dot = _run(["export", "--format", "dot", "--from", "P.top", "--project", str(root)], capsys)
+    assert new_dot == old_dot
+
+
 # One TestCase per project, so a failure names the Lean version it came from.
 for _project in _projects():
     _name = "TestEmitter_" + re.sub(r"\W", "_", _project.name)

@@ -22,9 +22,10 @@ from . import cli
 
 CONFIG_NAME = "lean4-lens.toml"
 
-# The elaborator-emitted dependency graph `lean4-lens dep-graph` writes and
-# `lean4-lens dep-tree` reads. Not `review-cone*.json`: those answer the review
+# The elaborator-emitted dependency graph `lean4-lens emit-refs` writes and
+# `lean4-lens refs` reads. Not `review-cone*.json`: those answer the review
 # document's question, and their statement-only refs go quiet on sorry-taint.
+# (`dep-graph` / `dep-tree` stay as aliases for one release.)
 DEP_GRAPH_NAME = "dep-graph.json"
 
 # Build output and tooling dirs are never project code, in any Lean project.

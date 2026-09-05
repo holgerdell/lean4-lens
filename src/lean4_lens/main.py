@@ -10,8 +10,10 @@ from .cli import bold, cyan, dim
 
 COMMANDS: dict[str, tuple[Callable[[Sequence[str]], int], str]] = {
     "review-cone": (review_cone.main, "render the review cone as a standalone HTML document"),
-    "dep-graph": (review_cone.dep_graph_main, "emit dep-graph.json, the data `dep-tree` reads"),
-    "dep-tree": (dep_tree.main, "query the dependency graph: reachability, taint, dead code"),
+    "emit-refs": (review_cone.dep_graph_main, "emit dep-graph.json, the data `refs` reads"),
+    "dep-graph": (review_cone.dep_graph_main, "alias of emit-refs (one release)"),
+    "refs": (dep_tree.main, "query the proof references: check gates, shows, exports"),
+    "dep-tree": (dep_tree.main, "alias of refs (one release)"),
     "heavy-tactics": (heavy_tactics.main, "where the expensive tactics are used"),
     "build-times": (build_times.main, "per-module build time for a library"),
 }
