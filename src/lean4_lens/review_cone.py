@@ -374,9 +374,9 @@ def read_snippet(
 
 
 # Lean identifier-ish chunk: anything that is not whitespace or a structural
-# delimiter. `^` is included so `f^[n]` (iterate notation) doesn't glue its
+# delimiter (including floor and ceiling brackets). `^` is included so `f^[n]` (iterate notation) doesn't glue its
 # caret onto the preceding identifier and break the link lookup.
-_DELIM_RE = re.compile(r"([\s(){}\[\],;⟨⟩«»^])")
+_DELIM_RE = re.compile(r"([\s(){}\[\],;⟨⟩«»⌊⌋⌈⌉^])")
 
 
 @dataclass(frozen=True)
