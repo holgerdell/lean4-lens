@@ -1,19 +1,25 @@
 # lean4-lens
 
-Lean's type checker guarantees that the proofs are correct. It says nothing
-about whether the *statements* mean what they claim. Closing that gap is a
-human's job, and `lean4-lens` is built to make it as small as possible.
+Analysis tools for a Lean 4 project, built around the **review cone**. Why that
+is the thing worth building:
 
-The **review cone** is the transitive set of statements and definitions whose
-meaning can affect what a project's headline results say — the minimal set a
-reviewer must read to trust the formalization (a concept following
-[lean-atlas](https://github.com/NyxFoundation/lean-atlas)). `lean4-lens
-review-cone` computes it from the elaborator and renders it as one standalone,
-cross-linked HTML document.
+- ✅ Lean's type checker guarantees the *proofs* are correct
+- ❓ It says nothing about whether the *statements* mean what they claim
+- 👤 Only a human can close that gap — so the reading should be as small as possible
+- 🎯 The review cone is exactly that: the transitive set of statements and definitions whose meaning can affect the headline results (following [lean-atlas](https://github.com/NyxFoundation/lean-atlas))
 
-The other commands answer neighbouring questions off the same elaborator data:
-what depends on what, what is dead, where the expensive tactics are, and what
-each module costs to build.
+**What `lean4-lens review-cone` does:**
+
+- 🔍 Computes the cone from the elaborator, so nothing is guessed from the text
+- 📄 Renders it as one standalone, cross-linked HTML document a reviewer can read top to bottom
+- 🏅 Badges every declaration verified / tainted / sorry, and says which extra axioms it leans on
+- ⚙️ Takes its roots, sections and titles from one `review-cone.toml`
+
+**The other commands, off the same elaborator data:**
+
+- 🕸️ `refs` — what depends on what, what is unreachable, what a `sorry` blocks
+- 🐢 `heavy-tactics` — where the expensive tactics are used
+- ⏱️ `build-times` — what each module costs to build
 
 They are stdlib-only, and they find the project themselves (the nearest
 lakefile, walking up from the CWD; failing that, a single lakefile below it) —
