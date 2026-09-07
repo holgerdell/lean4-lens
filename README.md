@@ -1,21 +1,23 @@
 # lean4-lens
 
-Analysis tools for a Lean 4 project. Point them at a project and they report on
-it: what a reviewer must read, what depends on what, where the expensive tactics
-are, and what each module costs to build.
+Lean's type checker guarantees that the proofs are correct. It says nothing
+about whether the *statements* mean what they claim. Closing that gap is a
+human's job, and `lean4-lens` is built to make it as small as possible.
+
+The **review cone** is the transitive set of statements and definitions whose
+meaning can affect what a project's headline results say — the minimal set a
+reviewer must read to trust the formalization (a concept following
+[lean-atlas](https://github.com/NyxFoundation/lean-atlas)). `lean4-lens
+review-cone` computes it from the elaborator and renders it as one standalone,
+cross-linked HTML document.
+
+The other commands answer neighbouring questions off the same elaborator data:
+what depends on what, what is dead, where the expensive tactics are, and what
+each module costs to build.
 
 They are stdlib-only, and they find the project themselves (the nearest
-lakefile, walking up) — `--project DIR` on any command names one instead.
-
-They never modify your Lean sources, but they are not read-only: `review-cone`
-and `emit-refs` emit their JSON next to the project (running `lake build`
-first, unless `--no-build`), `build-times` writes `module_build_times.jsonl`
-and drives `lake`, and `refs show dead` writes `dead_candidates.jsonl` into the
-current directory. Every output path is overridable. Each command's `--help`
-is the authoritative list of its options; the sections below give the shape.
-
-Chain: first `lake build`, then `lean4-lens emit-refs --no-build`, then
-`lean4-lens refs check data-complete`.
+lakefile, walking up from the CWD; failing that, a single lakefile below it) —
+`--project DIR` on any command names one instead.
 
 ## Install
 
@@ -23,7 +25,88 @@ Chain: first `lake build`, then `lean4-lens emit-refs --no-build`, then
 uv tool install /path/to/lean4-lens     # or: uv run --project /path/to/lean4-lens lean4-lens
 ```
 
-## Commands
+## review-cone
+
+```sh
+lean4-lens review-cone
+```
+
+That builds the project's libraries, runs a Lean elaborator script over them to
+collect the cone from the roots named in `review-cone.toml`, and writes the
+document. Each declaration appears with its own source, ordered so nothing is
+read before what it depends on:
+
+- every reference to another project declaration is an internal link, every
+  mathlib or core reference a link to the mathlib4 docs;
+- each entry carries a status badge — verified (sorry-free, standard axioms
+  only), tainted (extra axioms, which are listed), or sorry — plus its file and
+  line span and a "used by" line back to its consumers in the cone;
+- a panel at the top summarises the whole cone's verification status and
+  records the Lean and Mathlib versions it was checked against;
+- headline results are grouped into the sections the config names; everything
+  else the cone dragged in lands in a supporting catch-all, in topological
+  order.
+
+The elaborator run needs `lake` on PATH. Options: `--no-build` skips the
+`lake build` warm-up, `--json FILE` re-renders JSON emitted earlier and skips
+the Lean run entirely, `--config`, `--out` and `--title` override the config,
+`--toc-support` forces the supporting declarations into the table of contents,
+and `--lean-root` points the source snippets at a different tree.
+
+### Configuring the document
+
+`review-cone.toml` at the Lean project root is the whole control surface, and
+`review-cone` requires it (`--config` names another file). It lists the roots
+in the order they should be read, and the sections they are grouped into:
+
+```toml
+title = "My Formalization"
+out = "docs/review-cone.html"
+
+[[section]]
+title = "Main results"
+decls = ["main_theorem", "algorithm_correct"]
+
+[section.titles]
+"main_theorem" = "Correctness of the algorithm"
+
+[section.labels]
+"main_theorem" = "Theorem 1"
+
+[support]
+title = "Supporting declarations"
+toc = false
+
+[info]
+heading = "Full source code"
+text = "Complete Lean sources, including all proofs, are hosted at"
+url = "https://example.org/my-formalization"
+```
+
+Every named decl is a root, and the cone is the transitive closure of them all.
+A decl may be named in only one section. `title` and `out` (relative to the
+project root) name the document itself; `--title`/`--out` override them, and
+without them the document is written next to the project as
+`<config-stem>.html`.
+
+Per section: `titles` gives a decl a display title, `labels` replaces the kind
+and Lean name in its heading with something like "Theorem 1", and `toc = false`
+keeps the section out of the table of contents. A dotted Lean name must be
+quoted, or TOML reads it as a nested table.
+
+Cone members no section claims land in the `[support]` catch-all: rendered
+last in topological order, and kept out of the table of contents unless
+`support.toc = true` (or `--toc-support`).
+
+The optional `[info]` table adds a panel under the verification panel pointing
+a reader at the full sources. `url` is required; `heading` and `text` have the
+defaults shown. Leave the table out and no panel is rendered.
+
+A project may keep several review documents: every `review-cone*.toml` is a
+config in its own right (`--config` selects one), each emitting JSON and HTML
+named after itself. `refs`' default roots are the union of them all.
+
+## The other commands
 
 ```
 lean4-lens review-cone     render the review cone as a standalone HTML document
@@ -34,28 +117,29 @@ lean4-lens build-times     per-module build time for a library
 ```
 
 `dep-graph` and `dep-tree` stay as aliases of `emit-refs` and `refs` for one
-release.
+release. Each command's `--help` is the authoritative list of its options; the
+sections below give the shape.
 
-### review-cone
-
-The review cone is the transitive set of statements a human must read to trust
-that a formalization says what it claims — a concept following
-[lean-atlas](https://github.com/NyxFoundation/lean-atlas). `lean4-lens
-review-cone` builds the libraries (skip with `--no-build`), runs a Lean
-elaborator script over them, and writes a standalone cross-linked HTML
-document: every project reference an internal link, every mathlib reference a
-link to the mathlib4 docs. `--json FILE` re-renders JSON emitted earlier and
-skips the Lean run entirely.
+These commands never modify your Lean sources, but they are not read-only:
+`review-cone` and `emit-refs` write their JSON next to the project (running
+`lake build` first, unless `--no-build`), `build-times` writes
+`module_build_times.jsonl` and drives `lake`, and `refs show dead` writes
+`dead_candidates.jsonl` into the current directory. Every output path is
+overridable.
 
 ### emit-refs
 
-Runs the same Lean emitter but writes `dep-graph.json`: every project
-declaration with the declarations its proof refers to. That file is what
-`refs` reads.
+Runs the same Lean emitter as `review-cone`, but over every project
+declaration and writing `dep-graph.json`: each declaration with the
+declarations its proof refers to. That file is what `refs` reads.
+
+Chain: first `lake build`, then `lean4-lens emit-refs --no-build`, then
+`lean4-lens refs check data-complete`.
 
 ### refs
 
-Answers proof-reference questions over `dep-graph.json`:
+Answers proof-reference questions. It takes the declarations from the project's
+own sources and every edge from `dep-graph.json`:
 
 ```
 check data-complete   does the committed graph still describe the code?
@@ -76,20 +160,21 @@ flat names (`summary`, `coverage`, `from`, `direct`, `rdeps`, `dag`, `dot`,
 `json`, `reach`, `dead`, `sorry-paths`, `orphans`) stay as hidden aliases for
 one release.
 
-`reach` and `show dead` take root declarations as arguments, or `--root-file PATH`
-for every decl in a file; with neither they fall back to the roots named in the
-project's `review-cone*.toml`. Both can write their split as JSONL
-(`--out-used` / `--out-unused`). `show dead` writes `dead_candidates.jsonl` by
-default (`--out` redirects it, `--no-out` skips it) and takes `--closure` for
-the whole removable set in one pass, rather than only the globally-orphaned
-decls, plus `--global` to ignore roots entirely.
+`show reach` and `show dead` take root declarations as arguments, or
+`--root-file PATH` for every decl in a file; with neither they fall back to the
+roots named in the project's `review-cone*.toml`. Both can write their split as
+JSONL (`--out-used` / `--out-unused`). `show dead` writes
+`dead_candidates.jsonl` by default (`--out` redirects it, `--no-out` skips it)
+and takes `--closure` for the whole removable set in one pass, rather than only
+the globally-orphaned decls, plus `--global` to ignore roots entirely.
 
 References come from the elaborator only. A declaration the data misses gets no
 edges and is reported, never guessed at.
 
-`summary --fail-on-sorry` / `--fail-on-axioms` turn the report into a CI gate
-(exit 1 on findings), and every scan-based command exits 2 when it finds no
-project files at all — a gate that scanned nothing must not pass as clean.
+`check taint-status --fail-on-sorry` / `--fail-on-axioms` turn the report into
+a CI gate (exit 1 on findings), and every scan-based command exits 2 when it
+finds no project files at all — a gate that scanned nothing must not pass as
+clean.
 
 ### heavy-tactics
 
@@ -109,53 +194,12 @@ avoids the core-stealing noise of a parallel build. `--runs N` reports the
 minimum of N timings; `--lib NAME` and `--exclude DIR` narrow what is measured;
 `--no-build` skips the `lake build` warm-up when the oleans are already current.
 
-## Project configuration
+### Which files count as project code
 
-Both files are optional and live at the Lean project root.
-
-`review-cone.toml` names the roots and the section layout of the review
-document, plus the document's own `title` and `out` path (relative to the
-project root; `--title`/`--out` override). Each `[[section]]` has a `title`
-and a `decls` list; every named decl is a root, and the cone is the transitive
-closure of them all.
-
-Cone members no section claims land in the `[support]` catch-all: rendered
-last in topological order, and kept out of the table of contents unless
-`support.toc = true` (or `--toc-support`). A section-local `[section.titles]`
-table gives individual decls a display title; a dotted Lean name must be
-quoted, or TOML reads it as a nested table.
-
-```toml
-title = "My Formalization"
-out = "docs/review-cone.html"
-
-[[section]]
-title = "Main results"
-decls = ["main_theorem", "algorithm_correct"]
-
-[section.titles]
-"main_theorem" = "Correctness of the algorithm"
-
-[support]
-title = "Supporting declarations"
-toc = false
-
-[info]
-heading = "Full source code"
-text = "Complete Lean sources, including all proofs, are hosted at"
-url = "https://example.org/my-formalization"
-```
-
-The optional `[info]` table adds a panel under the verification panel pointing
-a reader at the full sources. `url` is required; `heading` and `text` have the
-defaults shown. Leave the table out and no panel is rendered.
-
-A project may keep several review documents: every `review-cone*.toml` is a
-config in its own right (`--config` selects one), each emitting JSON and HTML
-named after itself. `refs`' default roots are the union of them all.
-
-`lean4-lens.toml` says which files count as project code. Build trees and
-dot-directories are always skipped, so most projects need nothing here.
+The optional `lean4-lens.toml`, also at the Lean project root, says which files
+the scanning commands (`refs`, `heavy-tactics`) treat as project code. Build
+trees and dot-directories are always skipped, so most projects need nothing
+here.
 
 ```toml
 [scan]
