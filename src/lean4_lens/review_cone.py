@@ -217,6 +217,15 @@ def toolchain_info(lean_root: Path) -> str:
     return ", ".join(bits)
 
 
+_SMALL_NUMS = ["zero", "one", "two", "three", "four", "five", "six", "seven",
+               "eight", "nine", "ten", "eleven", "twelve"]
+
+
+def spell(n: int) -> str:
+    """Spell out small counts (0-12) in running prose; keep larger ones numeric."""
+    return _SMALL_NUMS[n] if 0 <= n < len(_SMALL_NUMS) else str(n)
+
+
 def anchor_id(name: str) -> str:
     # Encode every non-ASCII-alphanumeric char by codepoint so distinct names
     # (e.g. ...μ vs ...ℱ) never collide onto the same anchor.
@@ -628,6 +637,7 @@ CSS = """
   --bad: #b21f1f; --bad-bg: #fbe1e1; --bad-icon: #c62828;
   --bad-panel-bg: #fdecec; --bad-panel-border: #f0bcbc;
   --bad-pill-bg: #f6cccc; --bad-pill-fg: #8a1515;
+  --info-panel-bg: #eef4fb; --info-panel-border: #c3dbf3;
 }
 body { font-family: var(--font-sans); max-width: 1000px;
        margin: 2rem auto; padding: 0 1rem; color: var(--gray-900); line-height: var(--lh); }
@@ -673,12 +683,14 @@ strong.label { font-weight: var(--fw-semibold); }
 .vpanel.ok { background: var(--ok-panel-bg); border-color: var(--ok-panel-border); }
 .vpanel.warn { background: var(--warn-panel-bg); border-color: var(--warn-panel-border); }
 .vpanel.sorry { background: var(--bad-panel-bg); border-color: var(--bad-panel-border); }
+.vpanel.info { background: var(--info-panel-bg); border-color: var(--info-panel-border); }
 .vpanel-icon { font-size: var(--fs-xl); line-height: var(--lh); flex: none; width: 1.9rem;
                height: 1.9rem; display: flex; align-items: center;
                justify-content: center; border-radius: 50%; color: var(--white); }
 .vpanel.ok .vpanel-icon { background: var(--ok); }
 .vpanel.warn .vpanel-icon { background: var(--warn-icon); }
 .vpanel.sorry .vpanel-icon { background: var(--bad-icon); }
+.vpanel.info .vpanel-icon { background: var(--link-proj); }
 .vpanel-head { font-weight: var(--fw-semibold); font-size: var(--fs-lg); }
 .vpanel-pills { margin: .35rem 0 .1rem; }
 .vpanel-sub { font-size: var(--fs-base); color: var(--gray-700); margin-top: .2rem; }
@@ -873,8 +885,9 @@ def render(
         return html.escape(" — ".join(parts))
 
     ptitle = title_override or (f"the {package}" if package else "this Lean project")
-    title = "Review cone — " + ptitle
+    title = "Lean 4 formalization of " + ptitle
     named_titles = [t for t, _, entries in section_entries if entries]  # headings that actually render, in order
+    n_headline = sum(len(entries) for _, _, entries in section_entries)
 
     def _em(t: str) -> str:
         return f"<em>{html.escape(t)}</em>"
@@ -889,7 +902,7 @@ def render(
         "<!doctype html><html><head><meta charset='utf-8'>",
         f"<title>{html.escape(title)}</title>",
         f"<style>{CSS}</style></head><body>",
-        f"<h1>Review cone of <em>{html.escape(ptitle)}</em></h1>",
+        f"<h1>Lean 4 formalization of <em>{html.escape(ptitle)}</em></h1>",
         "<p>Lean's type checker guarantees the proofs are logically correct, but "
         "not that the theorem <em>statements</em> actually express the intended "
         "mathematics &mdash; a formalization can type-check yet fail to capture the "
@@ -900,15 +913,26 @@ def render(
         "definitions whose meaning can affect what the results say &mdash; the "
         "minimal set one must read to trust the formalization. The proofs themselves "
         "can be taken on trust, since the checker guarantees them.</p>",
-        "<p>The cone is grouped into sections"
+        f"<p>The {spell(n_headline)} results are grouped into sections"
         + (f" &mdash; {order_prose}" if order_prose else "")
-        + f"; the remaining <em>{html.escape(support_title.lower())}</em> follow in "
-        "<em>topological order</em>, each after everything it depends on. The "
+        + f"; the {spell(len(support))} remaining <em>{html.escape(support_title.lower())}</em> "
+        "follow in <em>topological order</em>, each after everything it depends on. The "
         "defined name is <strong class='self'>bold pink</strong> at its definition. "
         "<a class='proj' href='#'>Blue links</a> jump within this document; "
         "<a class='mlib' href='#'>brown links</a> open the mathlib4 docs.</p>",
     ]
     parts.append(panel)
+    info = config["info"]
+    if info is not None:
+        url = html.escape(info["url"])
+        parts.append(
+            "<section class='vpanel info'><div class='vpanel-icon'>\u2139</div>"
+            "<div class='vpanel-body'>"
+            f"<div class='vpanel-head'>{html.escape(info['heading'])}</div>"
+            f"<div class='vpanel-sub'>{html.escape(info['text'])} "
+            f"<a class='proj' href='{url}' target='_blank'>{url}</a></div>"
+            "</div></section>"
+        )
 
     toc_sections = [(t, e) for t, in_toc, e in section_entries if e and in_toc]
     if toc_sections or (support and show_support_toc):

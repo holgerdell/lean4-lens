@@ -139,7 +139,16 @@ decls = ["main_theorem", "algorithm_correct"]
 [support]
 title = "Supporting declarations"
 toc = false
+
+[info]
+heading = "Full source code"
+text = "Complete Lean sources, including all proofs, are hosted at"
+url = "https://example.org/my-formalization"
 ```
+
+The optional `[info]` table adds a panel under the verification panel pointing
+a reader at the full sources. `url` is required; `heading` and `text` have the
+defaults shown. Leave the table out and no panel is rendered.
 
 A project may keep several review documents: every `review-cone*.toml` is a
 config in its own right (`--config` selects one), each emitting JSON and HTML
