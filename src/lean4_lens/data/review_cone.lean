@@ -87,20 +87,49 @@ def docUrl (env : Environment) (n : Name) : Option String :=
     let path := m.toString.replace "." "/"
     some s!"https://leanprover-community.github.io/mathlib4_docs/{path}.html#{n}"
 
+/-- Whether `s` is a value of a subsingleton type such as a `Decidable` or
+`Fintype` instance. Any two inhabitants of a subsingleton are equal, so no
+definition of such a value can change what a term mentioning it means. -/
+def isSubsingletonValue (s : Expr) : MetaM Bool := do
+  try
+    let t ← Meta.inferType s
+    if t.isSort || !(← Meta.inferType t).isSort then return false
+    return (← Meta.synthInstance? (← mkAppM ``Subsingleton #[t])).isSome
+  catch _ => return false
+
+/-- `e` with every subsingleton-typed subterm — and, with `proofs`, every proof
+subterm — replaced by a `sorryAx` placeholder. In a statement both are erased,
+so its embedded proof terms (an instance's field, a tactic-built index bound, …)
+and its instances (the `Fintype` behind `Fintype.card`, the `Decidable` behind
+an `if`) contribute no constants of their own. In a definition's value only the
+instances are erased: a proof used there as data, e.g. the argument of
+`Classical.choose`, keeps the theorem it names in view. -/
+def eraseIrrelevant (e : Expr) (proofs : Bool := true) : MetaM Expr :=
+  Meta.transform e (skipConstInApp := true)
+    (pre := fun s => do
+      if (proofs && (← Meta.isProof s)) || (← isSubsingletonValue s) then
+        return .done (← mkSorry (← Meta.inferType s) true)
+      return .continue)
+
 /-- Constants referenced in an expression, filtered to real (non-internal) decls.
 Internal auxiliaries (e.g. `foo._proof_1`, lifted from a proof obligation in a
-def body) are transparently expanded to the constants *they* use, so genuine
-references hidden behind them are still collected. -/
-partial def usedConsts (env : Environment) (e : Expr) : Array Name := Id.run do
+def body, or the `match_N`/`_unary` companions of a recursive definition) are
+transparently expanded to the constants *they* use, so genuine references hidden
+behind them are still collected. With `erase`, the expression and every expanded
+auxiliary are first stripped of irrelevant subterms (see `eraseIrrelevant`;
+`proofs` says whether proof subterms count as irrelevant). -/
+partial def usedConsts (env : Environment) (e : Expr) (erase : Bool := false)
+    (proofs : Bool := true) : MetaM (Array Name) := do
+  let strip (e : Expr) : MetaM Expr := if erase then eraseIrrelevant e proofs else pure e
   let mut out : Array Name := #[]
   let mut seen : NameSet := {}
-  let mut work := e.getUsedConstants.toList
+  let mut work := (← strip e).getUsedConstants.toList
   while !work.isEmpty do
     let n := work.head!
     work := work.tail!
     if seen.contains n then continue
     seen := seen.insert n
-    if n == ``sorryAx then continue  -- placeholder left by `eraseProofs`
+    if n == ``sorryAx then continue  -- placeholder left by `eraseIrrelevant`
     -- `Lean.*` constants are elaboration internals (e.g. an omega certificate
     -- in a def value), never genuine statement dependencies of a project.
     if (`Lean).isPrefixOf n then continue
@@ -109,11 +138,11 @@ partial def usedConsts (env : Environment) (e : Expr) : Array Name := Id.run do
     let u := userName n
     if u.isInternal then
       -- expand the lifted auxiliary into the constants it actually references
-      work := work ++ ci.type.getUsedConstants.toList
+      work := work ++ (← strip ci.type).getUsedConstants.toList
       match ci with
-      | .defnInfo d => work := work ++ d.value.getUsedConstants.toList
+      | .defnInfo d => work := work ++ (← strip d.value).getUsedConstants.toList
       | .thmInfo d => work := work ++ d.value.getUsedConstants.toList
-      | .opaqueInfo d => work := work ++ d.value.getUsedConstants.toList
+      | .opaqueInfo d => work := work ++ (← strip d.value).getUsedConstants.toList
       | _ => pure ()
     else
       -- Keep stored names for environment lookup during closure traversal.
@@ -121,34 +150,27 @@ partial def usedConsts (env : Environment) (e : Expr) : Array Name := Id.run do
       out := out.push n
   return out
 
-/-- `e` with every proof subterm replaced by a `sorryAx` placeholder, so a
-statement's embedded proof terms (an instance's field, a tactic-built index
-bound, …) contribute no constants of their own. -/
-def eraseProofs (e : Expr) : MetaM Expr :=
-  Meta.transform e (skipConstInApp := true)
-    (pre := fun s => do
-      if ← Meta.isProof s then
-        return .done (← mkSorry (← Meta.inferType s) true)
-      return .continue)
-
 /-- All constants this decl exposes: its type, the field types of a
 structure/inductive, and — when `withValue` — its value, including a theorem's
-proof. Proof subterms embedded in *types* are erased first, so tactic internals
-are never reported as dependencies. -/
-def stmtConsts (env : Environment) (ci : ConstantInfo) (withValue : Bool) :
-    MetaM (Array Name) := do
-  let mut r := usedConsts env (← eraseProofs ci.type)
+proof. Proofs and subsingleton instances embedded in *types* are erased first, so
+tactic internals and instances are never reported as dependencies; with
+`eraseValue` the instances (but not the proofs) in a definition's value are
+erased too. A theorem's proof is never erased: its references are the point of
+the dependency graph. -/
+def stmtConsts (env : Environment) (ci : ConstantInfo) (withValue : Bool)
+    (eraseValue : Bool := false) : MetaM (Array Name) := do
+  let mut r ← usedConsts env ci.type (erase := true)
   if withValue then
     match ci with
-    | .defnInfo d => r := r ++ usedConsts env d.value
-    | .opaqueInfo d => r := r ++ usedConsts env d.value
-    | .thmInfo d => r := r ++ usedConsts env d.value
+    | .defnInfo d => r := r ++ (← usedConsts env d.value eraseValue (proofs := false))
+    | .opaqueInfo d => r := r ++ (← usedConsts env d.value eraseValue (proofs := false))
+    | .thmInfo d => r := r ++ (← usedConsts env d.value)
     | _ => pure ()
   match ci with
   | .inductInfo iv =>
     for c in iv.ctors do
       if let some (.ctorInfo cv) := env.find? c then
-        r := r ++ usedConsts env (← eraseProofs cv.type)
+        r := r ++ (← usedConsts env cv.type (erase := true))
   | _ => pure ()
   return r
 
@@ -206,7 +228,7 @@ partial def closure (env : Environment) (prefixes : Array Name) (roots : Array N
   let mut work : List Name := []
   for r in roots do
     if let some ci := env.find? r then
-      work := work ++ (usedConsts env (← eraseProofs ci.type)).toList
+      work := work ++ (← usedConsts env ci.type (erase := true)).toList
   while !work.isEmpty do
     let n := work.head!
     work := work.tail!
@@ -223,7 +245,7 @@ partial def closure (env : Environment) (prefixes : Array Name) (roots : Array N
         proj := proj.push n
         -- statement-only for theorems, matching what this mode emits
         let withVal := match ci with | .thmInfo _ => false | _ => true
-        work := work ++ (← stmtConsts env ci withVal).toList
+        work := work ++ (← stmtConsts env ci withVal (eraseValue := true)).toList
     else
       -- doc-gen4 has no page for a synthesized companion (recursor, `casesOn`,
       -- matcher, `noConfusion`, …), so report the parent type the reader can
@@ -397,7 +419,7 @@ def emitJson (prefixes : Array Name) (projectRoot : String) (roots : Array Name)
       | none => false
     -- a theorem exposes only its type, unless the reader wants its proof
     let withVal := depMode || kindStr env n != "theorem"
-    let refs := ((← stmtConsts env ci withVal).toList.map userName).eraseDups
+    let refs := ((← stmtConsts env ci withVal (eraseValue := !depMode)).toList.map userName).eraseDups
     let refsStr := String.intercalate ", " (refs.map (fun r => s!"\"{jsonEsc r.toString}\""))
     let (status, axsList) ← axiomInfo n
     let axsStr := String.intercalate ", " (axsList.map (fun a => s!"\"{jsonEsc a.toString}\""))
