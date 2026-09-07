@@ -22,8 +22,17 @@ lakefile, walking up from the CWD; failing that, a single lakefile below it) —
 ## Install
 
 ```sh
-uv tool install /path/to/lean4-lens     # or: uv run --project /path/to/lean4-lens lean4-lens
+uv tool install git+https://github.com/holgerdell/lean4-lens
 ```
+
+Or run it without installing:
+
+```sh
+uvx --from git+https://github.com/holgerdell/lean4-lens lean4-lens --help
+```
+
+From a local checkout: `uv tool install /path/to/lean4-lens`, or
+`uv run --project /path/to/lean4-lens lean4-lens`.
 
 ## review-cone
 
