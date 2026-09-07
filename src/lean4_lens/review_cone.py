@@ -376,11 +376,20 @@ def split_docstring(snippet: str) -> tuple[str, str]:
     Use the Lean scanner so nested comments cannot consume declaration code.
     Field docs and comments within the definition stay with their source.
     """
+    prefix = ""
     for lo, hi, kind in iter_spans(snippet):
-        if not snippet[lo:hi].strip():
+        piece = snippet[lo:hi]
+        if not piece.strip():
             continue
-        if kind == "comment" and snippet[lo:hi].startswith("/--"):
-            return snippet[lo + 3:hi - 2].strip(), snippet[hi:].lstrip("\n\r")
+        if kind == "comment" and piece.startswith("/--"):
+            return piece[3:-2].strip(), prefix + snippet[hi:].lstrip("\n\r")
+        # `open … in` / `set_option … in` lines may precede the docstring.
+        if kind == "code" and not prefix and all(
+            ln.strip().endswith(" in") and ln.split()[0] in ("open", "set_option")
+            for ln in piece.strip().splitlines()
+        ):
+            prefix = piece
+            continue
         break
     return "", snippet
 
