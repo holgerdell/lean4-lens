@@ -105,7 +105,9 @@ partial def usedConsts (env : Environment) (e : Expr) : Array Name := Id.run do
       | .opaqueInfo d => work := work ++ d.value.getUsedConstants.toList
       | _ => pure ()
     else
-      out := out.push u
+      -- Keep stored names for environment lookup during closure traversal.
+      -- A private declaration's user-facing name does not resolve in `env`.
+      out := out.push n
   return out
 
 /-- `e` with every proof subterm replaced by a `sorryAx` placeholder, so a
@@ -384,7 +386,7 @@ def emitJson (prefixes : Array Name) (projectRoot : String) (roots : Array Name)
       | none => false
     -- a theorem exposes only its type, unless the reader wants its proof
     let withVal := depMode || kindStr env n != "theorem"
-    let refs := (← stmtConsts env ci withVal).toList.eraseDups
+    let refs := ((← stmtConsts env ci withVal).toList.map userName).eraseDups
     let refsStr := String.intercalate ", " (refs.map (fun r => s!"\"{jsonEsc r.toString}\""))
     let (status, axsList) ← axiomInfo n
     let axsStr := String.intercalate ", " (axsList.map (fun a => s!"\"{jsonEsc a.toString}\""))

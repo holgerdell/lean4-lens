@@ -125,7 +125,7 @@ def _kw(keyword: str) -> str:
 # (`theorem foo.{u}`) ends the name instead of donating a trailing dot.
 _NAME_SEG = r"(?:[\w'][\w'?!]*|«[^»]*»)"
 DECL_RE = re.compile(
-    r"^"
+    r"^[ \t]*"
     + symbols.ATTR_PREFIX
     + symbols.MODIFIERS
     + r"(?:"
@@ -191,7 +191,8 @@ PRIVATE_RE = re.compile(r"(?<![\w])private\b")
 # shares the name — the sorry term is always bare.
 SORRY_RE = re.compile(r"(?<![\w.])sorry\b")
 
-# A column-0 attribute line (`@[simp]`, `@[ext]`, ...) terminates the prior
+# An attribute line (`@[simp]`, `@[ext]`, ...) at the declaration's indentation
+# or less terminates the prior
 # decl's body even though the actual keyword (`theorem`/`def`/...) lives on
 # the next line. Without this, `extract_decl_body` absorbs the attribute
 # block into the previous decl and leaks attribute-arg identifiers into its
@@ -297,38 +298,44 @@ def _ns_names(scopes: list[Scope]) -> list[str]:
 def namespace_stack_at(lines: list[str], decl_line: int) -> list[str]:
     """Active namespace stack just before `decl_line` (0-indexed)."""
     scopes: list[Scope] = []
-    for line in lines[:decl_line]:
+    blank_lines = blank_comments_and_strings("".join(lines)).splitlines(keepends=True)
+    for line in blank_lines[:decl_line]:
         _scope_update(scopes, line)
     return _ns_names(scopes)
 
 
 def _decl_body_end(lines: Sequence[str], start: int, header_end: int | None = None) -> int:
-    """One past the body's last line: the body runs from `start` to the line
-    before the next column-0 decl or attribute line (see `extract_decl_body`)."""
+    """Find the next command at this declaration's indentation or less.
+
+    `lines` must already have comments and literals blanked.
+    """
     if header_end is None:
         header_end = start
+    indent = len(lines[start]) - len(lines[start].lstrip(" \t"))
     for i in range(header_end + 1, len(lines)):
         line = lines[i]
-        if len(line) - len(line.lstrip()) == 0 and (TOP_LEVEL_RE.match(line) or ATTR_LINE_RE.match(line)):
+        stripped = line.lstrip(" \t")
+        if len(line) - len(stripped) <= indent and (TOP_LEVEL_RE.match(stripped) or ATTR_LINE_RE.match(stripped)):
             return i
     return len(lines)
 
 
 def extract_decl_body(lines: Sequence[str], start: int, header_end: int | None = None) -> str:
-    """Body = `start` line through the line before the next column-0 decl.
+    """Body = `start` through the next command at the same or lesser indentation.
 
-    A column-0 attribute line (``@[...]``) also terminates the body — it
+    An attribute line (``@[...]``) at that indentation also ends the body — it
     belongs to the *next* decl even though the keyword is on a later line.
 
     `header_end` (0-indexed) is the last line of *this* decl's own header —
-    when the decl carries a leading column-0 attribute (e.g. ``@[simp]``
+    when the decl carries a leading attribute (e.g. ``@[simp]``
     on the line above ``theorem``), `DECL_RE` anchors `start` at the attribute,
     so the keyword line would otherwise be mistaken for the *next* decl and the
     body collapse to just the attribute. Lines ``start..header_end`` are always
     kept and the next-decl break-scan begins after them. Defaults to `start`
     (single-line header) for backward compatibility.
     """
-    return "".join(lines[start : _decl_body_end(lines, start, header_end)])
+    blank_lines = blank_comments_and_strings("".join(lines)).splitlines(keepends=True)
+    return "".join(lines[start : _decl_body_end(blank_lines, start, header_end)])
 
 
 def scan_file(path: Path, root: Path) -> list[Decl]:
@@ -360,7 +367,7 @@ def scan_file(path: Path, root: Path) -> list[Decl]:
         # instead of mistaking it for the next decl.
         header_end_idx = scan_text[: m.end()].count("\n")
         while ns_cursor < line_idx:
-            _scope_update(scopes, lines[ns_cursor])
+            _scope_update(scopes, blank_lines[ns_cursor])
             ns_cursor += 1
         if name.startswith("_root_."):
             # `def _root_.Foo.bar` inside `namespace My.Module` declares
@@ -370,11 +377,11 @@ def scan_file(path: Path, root: Path) -> list[Decl]:
             full_name = name
         else:
             full_name = ".".join([*_ns_names(scopes), name])
-        end_idx = _decl_body_end(lines, line_idx, header_end_idx)
+        end_idx = _decl_body_end(blank_lines, line_idx, header_end_idx)
         body_span = lines[line_idx:end_idx]
         while body_span and not body_span[-1].strip():
             body_span.pop()
-        header = m.group(0)
+        header = m.group(0).lstrip(" \t")
         out.append(
             Decl(
                 name=name,
@@ -894,7 +901,7 @@ def fmt_dot(g: Graph, subgraph: str | None) -> str:
         included = {d.uid for d in g.decls}
 
     def node_id(name: str) -> str:
-        return '"' + name.replace('"', '\\"').replace(".", "_") + '"'
+        return json.dumps(name, ensure_ascii=False)
 
     def short(d: Decl) -> str:
         return d.full_name.split(".")[-1]
@@ -904,8 +911,8 @@ def fmt_dot(g: Graph, subgraph: str | None) -> str:
         if d.uid not in included:
             continue
         color = "red" if d.has_sorry else "orange" if d.tainted else "lightblue"
-        label = f"{short(d)}\\n{d.file}:{d.line}"
-        dot.append(f'  {node_id(d.uid)} [label="{label}" style=filled fillcolor={color}];')
+        label = node_id(f"{short(d)}\n{d.file}:{d.line}")
+        dot.append(f"  {node_id(d.uid)} [label={label} style=filled fillcolor={color}];")
     dot.append("")
     for d in g.decls:
         if d.uid not in included:

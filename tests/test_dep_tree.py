@@ -162,6 +162,97 @@ def test_dotted_sorry_ref_is_not_a_sorry() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("literal", ['\'"\'', r"'\"'", r"'\''", r"'\\'", r"'\n'", "'λ'"])
+def test_character_literal_keeps_following_sorry_visible(tmp_path: Path, literal: str) -> None:
+    root = _write_lean_tree(
+        tmp_path,
+        {"A.lean": f"def quote' : Char := {literal}\ntheorem unfinished : True := by sorry\n"},
+        deps={"quote'": ("A.lean", []), "unfinished": ("A.lean", [])},
+    )
+    g = D.build_graph(root)
+    assert [(d.full_name, d.line, d.has_sorry) for d in g.decls] == [
+        ("quote'", 1, False), ("unfinished", 2, True),
+    ]
+    assert D.main(["check", "taint-status", "--project", str(root), "--fail-on-sorry"]) == 1
+
+
+def test_apostrophes_in_identifiers_are_not_character_literals() -> None:
+    source = "def f' (x' : Nat) := x'\ntheorem t' : f' 0 = 0 := rfl\n"
+    assert S.blank_comments_and_strings(source) == source
+
+
+@pytest.mark.parametrize("name", ["«'a'»", "«'\"'»", "«--»", "«/-»"])
+def test_quoted_identifiers_preserve_literal_and_comment_delimiters(name: str) -> None:
+    source = f"def {name} : Nat := 0\ntheorem good : {name} = 0 := rfl\n"
+    assert S.blank_comments_and_strings(source) == source
+    assert _names_in(source) == {name, "good"}
+
+
+@pytest.mark.parametrize("indent", ["  ", "\t"])
+def test_indented_declarations_keep_separate_bodies_and_refs(tmp_path: Path, indent: str) -> None:
+    root = _write_lean_tree(
+        tmp_path,
+        {"A.lean": (
+            "namespace P\n"
+            f"{indent}theorem clean : True := by trivial\n"
+            f"{indent}@[simp]\n"
+            f"{indent}theorem unfinished : True := by\n"
+            f"{indent}  sorry\n"
+            f"{indent}theorem dependent : True := unfinished\n"
+            "end P\n"
+            "theorem outside : True := by trivial\n"
+        )},
+        deps={
+            "P.clean": ("A.lean", []), "P.unfinished": ("A.lean", []),
+            "P.dependent": ("A.lean", ["P.unfinished"]), "outside": ("A.lean", []),
+        },
+    )
+    g = D.build_graph(root)
+    assert [(d.full_name, d.line, d.has_sorry) for d in g.decls] == [
+        ("P.clean", 2, False), ("P.unfinished", 3, True),
+        ("P.dependent", 6, False), ("outside", 8, False),
+    ]
+    assert g.by_full["P.dependent"].refs == ["P.unfinished"]
+    assert g.by_full["P.dependent"].tainted
+    assert D.main(["check", "data-complete", "--project", str(root)]) == 0
+    assert D.main(["check", "taint-status", "--project", str(root), "--fail-on-sorry"]) == 1
+    # A present module with an omitted indented declaration must fail coverage.
+    data_path = root / P.DEP_GRAPH_NAME
+    data = json.loads(data_path.read_text())
+    data["project"] = [d for d in data["project"] if d["name"] != "P.unfinished"]
+    data_path.write_text(json.dumps(data))
+    assert D.main(["check", "data-complete", "--project", str(root)]) == 1
+
+
+@pytest.mark.parametrize("comment_line", ["example prose", "theorem fake : True := sorry", "@[simp]", "end P"])
+def test_comment_keywords_do_not_truncate_sorry_proofs(tmp_path: Path, comment_line: str) -> None:
+    root = _write_lean_tree(
+        tmp_path,
+        {"A.lean": (
+            "namespace P\ntheorem unfinished : True := by\n"
+            f"  /-\n{comment_line}\n/- nested comment -/\n  -/\n  sorry\n"
+            "theorem clean : True := by trivial\nend P\n"
+        )},
+        deps={"P.unfinished": ("A.lean", []), "P.clean": ("A.lean", [])},
+    )
+    assert [(d.full_name, d.has_sorry) for d in D.build_graph(root).decls] == [
+        ("P.unfinished", True), ("P.clean", False),
+    ]
+    assert D.main(["check", "taint-status", "--project", str(root), "--fail-on-sorry"]) == 1
+
+
+def test_comment_namespaces_do_not_change_declaration_names(tmp_path: Path) -> None:
+    source = (
+        "/-\nnamespace Fake\n-/\nnamespace Real\n"
+        "/-\nend Real\n/-\nnamespace NestedFake\n-/\n-/\n"
+        "theorem clean : True := by\n  /- sorry -/\n  trivial\nend Real\n"
+    )
+    root = _write_lean_tree(tmp_path, {"A.lean": source}, deps={"Real.clean": ("A.lean", [])})
+    assert [(d.full_name, d.has_sorry) for d in D.build_graph(root).decls] == [("Real.clean", False)]
+    assert D.namespace_stack_at(source.splitlines(keepends=True), 10) == ["Real"]
+    assert D.main(["check", "data-complete", "--project", str(root)]) == 0
+
+
 def test_nested_namespace_stack() -> None:
     # 18. Stack tracks nested namespaces and respects `end <name>` / bare `end`.
     src = "namespace A\nnamespace B\ntheorem t := sorry\nend B\ntheorem u := sorry\nend A\n"
@@ -1245,6 +1336,19 @@ class _EmitterTests(_MixinBase):
             "a theorem's document refs are not a subset of its dependency refs",
         )
 
+    def test_review_cone_includes_private_dependencies(self) -> None:
+        if not (self.project / "Fixture" / "Basic.lean").is_file():
+            self.skipTest("requires the repository's Fixture declarations")
+        out = Path(self.tmp.name) / "private-cone.json"
+        self._run_emitter(out, deps=False, roots=["Fixture.double_x"])
+        data = json.loads(out.read_text())
+        decls = {d["name"]: d for d in data["project"]}
+        self.assertIn("Fixture.scale", decls)
+        self.assertIn("Fixture.scale", decls["Fixture.double"]["refs"])
+        self.assertIn("Fixture.Point", decls["Fixture.scale"]["refs"])
+        self.assertIn("Fixture.Point", decls)
+        self.assertFalse(any("_private." in ref for d in decls.values() for ref in d["refs"]))
+
     def test_inductive_kinds_match_their_source_keyword(self) -> None:
         """A structure/class/inductive is labeled by its own keyword — the
         review document prints the label, so an `inductive` must not say
@@ -1451,6 +1555,31 @@ def test_p13_export_from_limits_to_cone(tmp_path: Path, capsys: pytest.CaptureFi
     _, old_dot = _run(["dot", "P.top", "--project", str(root)], capsys)
     _, new_dot = _run(["export", "--format", "dot", "--from", "P.top", "--project", str(root)], capsys)
     assert new_dot == old_dot
+
+
+def test_dot_export_preserves_distinct_names(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _write_lean_tree(
+        tmp_path,
+        {"A.lean": "def A.b : Nat := 0\ndef A_b : Nat := A.b\n"},
+        deps={"A.b": ("A.lean", []), "A_b": ("A.lean", ["A.b"])},
+    )
+    code, out = _run(["export", "--format", "dot", "--project", str(root)], capsys)
+    assert code == 0
+    assert '"A.b" [label=' in out
+    assert '"A_b" [label=' in out
+    assert '"A_b" -> "A.b";' in out
+    assert '"A_b" -> "A_b";' not in out
+
+
+def test_dot_export_escapes_quoted_identifiers(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _write_lean_tree(
+        tmp_path,
+        {"A.lean": 'def «a\\b» : Nat := 0\n'},
+        deps={"«a\\b»": ("A.lean", [])},
+    )
+    code, out = _run(["export", "--format", "dot", "--project", str(root)], capsys)
+    assert code == 0
+    assert '"«a\\\\b»" [label="«a\\\\b»\\nA.lean:1"' in out
 
 
 # One TestCase per project, so a failure names the Lean version it came from.

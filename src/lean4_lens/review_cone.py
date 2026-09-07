@@ -951,7 +951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument(
         "--json", type=Path, default=None, help="Render an existing review-cone.json and skip the Lean run."
     )
-    ap.add_argument("--out", type=Path, default=None, help="Output HTML path (default: <project>/review-cone.html).")
+    ap.add_argument("--out", type=Path, default=None, help="Output HTML path (default: <project>/<config-stem>.html).")
     ap.add_argument(
         "--title", type=str, default=None, help="Document title (default: derived from the lake package name)."
     )
@@ -1050,7 +1050,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Output: --out beats the config's `out` (resolved against the project
     # root) beats the default name.
     doc_root = project_root or lean_root
-    out_path = args.out or (doc_root / config["out"] if config["out"] else doc_root / "review-cone.html")
+    out_path = args.out or (doc_root / config["out"] if config["out"] else doc_root / f"{config_path.stem}.html")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html_str, encoding="utf-8")
 
