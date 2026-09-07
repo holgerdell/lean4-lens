@@ -49,6 +49,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
@@ -130,15 +131,62 @@ def elide_middle(s: str, head: int = 3000, tail: int = 1200) -> str:
     return f"{s[:head]}\n… [{len(s) - head - tail} chars elided] …\n{s[-tail:]}"
 
 
+def module_emitter_supported(root: Path) -> bool:
+    """Conservative version gate for module syntax and cached exported axioms.
+
+    Unknown/custom toolchains retain the legacy emitter. Respect elan's override.
+    """
+    toolchain = os.environ.get("ELAN_TOOLCHAIN")
+    if toolchain is None:
+        path = root / "lean-toolchain"
+        toolchain = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    match = re.fullmatch(r"leanprover/lean4:v(\d+)\.(\d+)\.(\d+)(?:-rc\d+)?", toolchain)
+    return bool(match and (int(match[1]), int(match[2])) >= (4, 32))
+
+
+def emitter_source(root: Path, *, deps: bool) -> str:
+    """Use public compiler imports on modern Lean; retain private proof data for deps."""
+    source = REVIEW_CONE_LEAN.read_text(encoding="utf-8")
+    if module_emitter_supported(root):
+        source = source.replace("-- MODULE_HEADER", "module", 1)
+        source = source.replace("unsafe def main :", "public unsafe def main :", 1)
+        if not deps:
+            source = source.replace("-- IMPORT_LEVEL", "(level := if privateOnly then .private else .server)", 1)
+    return source
+
+
+def run_emitter_process(command: list[str], root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Stream progress while retaining both streams for failure diagnostics.
+
+    Spool stdout to disk so a verbose emitter cannot fill an unread pipe.
+    """
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout:
+        with subprocess.Popen(command, cwd=root, env=env, stdout=stdout, stderr=subprocess.PIPE, text=True) as proc:
+            assert proc.stderr is not None
+            errors = []
+            for line in proc.stderr:
+                errors.append(line)
+                print(line, end="", file=sys.stderr, flush=True)
+            code = proc.wait()
+        stdout.seek(0)
+        return subprocess.CompletedProcess(command, code, stdout.read(), "".join(errors))
+
+
 def run_review_cone(
-    root: Path, libs: list[str], roots: list[str], out_json: Path, build: bool, *, deps: bool = False
+    root: Path, libs: list[str], roots: list[str], out_json: Path, build: bool, *,
+    deps: bool = False, imports: list[str] | None = None
 ) -> None:
-    """Build the libraries, then run review_cone.lean to emit JSON. `deps`
+    """Build the libraries (or explicit imports), then emit Lean-derived JSON. `deps`
     selects the dependency graph's data rather than the review document's, and
-    ignores `roots` (see `REVIEW_CONE_DEPS` in review_cone.lean)."""
+    ignores `roots` (see `REVIEW_CONE_DEPS` in review_cone.lean). `imports`
+    narrows entry modules only; `libs` still classifies all project declarations.
+    """
+    if deps and imports is not None:
+        raise ValueError("dependency graphs require all project modules")
+    targets = imports if imports is not None else libs
     if build:
-        print("  " + cli.dim(f"lake build {' '.join(libs)} …"))
-        warm = subprocess.run(["lake", "build", *libs], cwd=root, capture_output=True, text=True)
+        print("  " + cli.dim(f"lake build {' '.join(targets)} …"))
+        warm = subprocess.run(["lake", "build", *targets], cwd=root, capture_output=True, text=True)
         if warm.returncode != 0:
             # Build failed, but lake still writes .olean files for every module
             # that itself compiled cleanly — only the broken modules (and
@@ -171,16 +219,17 @@ def run_review_cone(
         "REVIEW_CONE_LIBS": ",".join(libs),
         "REVIEW_CONE_ROOTS": ",".join(roots),
     }
+    env.pop("REVIEW_CONE_DEPS", None)
+    env.pop("REVIEW_CONE_IMPORTS", None)
     if deps:
         env["REVIEW_CONE_DEPS"] = "1"
+    if imports is not None:
+        env["REVIEW_CONE_IMPORTS"] = ",".join(imports)
     cli.status("running review_cone.lean …")
-    proc = subprocess.run(
-        ["lake", "env", "lean", "--run", str(REVIEW_CONE_LEAN)],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    with tempfile.TemporaryDirectory(prefix="lean4-lens-") as tmp:
+        emitter = Path(tmp) / "review_cone.lean"
+        emitter.write_text(emitter_source(root, deps=deps), encoding="utf-8")
+        proc = run_emitter_process(["lake", "env", "lean", "--run", str(emitter)], root, env)
     cli.clear_transient()
     if proc.returncode != 0:
         # Show both streams (labeled) — `stderr or stdout` used to silently
@@ -1263,7 +1312,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Derive the JSON name from the config so multiple cones (multiple
         # configs) in one project don't clobber each other's JSON.
         json_path = project_root / (config_path.stem + ".json")
-        run_review_cone(project_root, libs, config["roots"], json_path, build=not args.no_build)
+        run_review_cone(
+            project_root, libs, config["roots"], json_path, build=not args.no_build, imports=config["imports"]
+        )
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
 

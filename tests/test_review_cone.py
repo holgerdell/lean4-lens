@@ -183,3 +183,71 @@ def test_type_ascription_is_not_mistaken_for_a_binder() -> None:
 def test_document_without_contents_has_no_sidebar_grid(tmp_path: Path) -> None:
     html = _render_fixture(tmp_path, 'title = "Fixture"\n[support]\ntoc = false\n')
     assert "class='layout'" not in html and "<nav" not in html and "<main>" in html
+
+
+@pytest.mark.parametrize("version,modern", [("4.19.0", False), ("4.30.0", False),
+                                           ("4.32.2", True), ("4.33.1", True), ("4.34.0-rc1", True)])
+def test_emitter_keeps_legacy_support_and_private_dependency_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                    version: str, modern: bool) -> None:
+    monkeypatch.delenv("ELAN_TOOLCHAIN", raising=False)
+    (tmp_path / "lean-toolchain").write_text(f"leanprover/lean4:v{version}\n")
+    cone = R.emitter_source(tmp_path, deps=False)
+    deps = R.emitter_source(tmp_path, deps=True)
+    assert cone.startswith("module\n") == modern
+    assert ("else .server)" in cone) == modern
+    assert "else .server)" not in deps
+    assert deps.startswith("module\n") == modern
+
+
+def test_custom_or_overridden_toolchain_is_conservative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "lean-toolchain").write_text("leanprover/lean4:v4.33.1")
+    monkeypatch.setenv("ELAN_TOOLCHAIN", "custom-toolchain")
+    assert not R.module_emitter_supported(tmp_path)
+    monkeypatch.setenv("ELAN_TOOLCHAIN", "leanprover/lean4:v4.19.0")
+    assert not R.module_emitter_supported(tmp_path)
+
+
+@pytest.mark.parametrize("imports", ['[]', '"Fixture"', '[1]', '[""]', '["A,B"]'])
+def test_config_rejects_invalid_imports(tmp_path: Path, imports: str) -> None:
+    cfg = tmp_path / "review-cone.toml"
+    cfg.write_text(f'imports = {imports}\n[[section]]\ntitle="Results"\ndecls=[]\n')
+    with pytest.raises(C.ConfigError, match="imports"):
+        C.load_config(cfg)
+
+
+def test_narrow_imports_preserve_project_classification(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    cfg = tmp_path / "review-cone.toml"
+    cfg.write_text('imports=["Entry"]\n[[section]]\ntitle="Results"\ndecls=["result"]\n')
+    config = C.load_config(cfg)
+    monkeypatch.setenv("REVIEW_CONE_DEPS", "1")
+    monkeypatch.setenv("REVIEW_CONE_IMPORTS", "Stale")
+    captured: dict[str, str] = {}
+
+    def run(command: list[str], root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        captured.update(env)
+        assert Path(command[-1]).is_file()
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(R, "run_emitter_process", run)
+    R.run_review_cone(tmp_path, ["Entry", "Support"], ["result"], tmp_path / "out.json",
+                      False, imports=config["imports"])
+    assert captured["REVIEW_CONE_LIBS"] == "Entry,Support"
+    assert captured["REVIEW_CONE_IMPORTS"] == "Entry"
+    assert "REVIEW_CONE_DEPS" not in captured
+    with pytest.raises(ValueError, match="all project modules"):
+        R.run_review_cone(tmp_path, ["Entry"], [], tmp_path / "deps.json", False, deps=True, imports=["Entry"])
+
+
+def test_progress_and_large_stdout_are_both_preserved(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import sys
+
+    proc = R.run_emitter_process(
+        [sys.executable, "-c", "import sys; print('x'*100000); print('import complete', file=sys.stderr)"],
+        tmp_path, {},
+    )
+    assert proc.returncode == 0
+    assert len(proc.stdout) == 100001
+    assert proc.stderr == "import complete\n"
+    assert "import complete" in capsys.readouterr().err

@@ -1349,6 +1349,23 @@ class _EmitterTests(_MixinBase):
         self.assertIn("Fixture.Point", decls)
         self.assertFalse(any("_private." in ref for d in decls.values() for ref in d["refs"]))
 
+    def test_module_cone_preserves_locations_and_axioms(self) -> None:
+        if not (self.project / "Fixture" / "Module.lean").is_file():
+            self.skipTest("requires the module-system fixture")
+        out = Path(self.tmp.name) / "module-cone.json"
+        R.run_review_cone(self.project, P.read_lib_names(self.project),
+                          ["Fixture.Module.clean", "Fixture.Module.usesExtra", "Fixture.Module.unfinished"],
+                          out, False, imports=["Fixture.Module"])
+        decls = {d["name"]: d for d in json.loads(out.read_text())["project"]}
+        self.assertIn("Fixture.Module.offset", decls)
+        self.assertEqual(decls["Fixture.Module.clean"]["status"], "verified")
+        self.assertEqual(decls["Fixture.Module.usesExtra"]["status"], "tainted")
+        self.assertIn("Fixture.Module.extra", decls["Fixture.Module.usesExtra"]["axioms"])
+        self.assertEqual(decls["Fixture.Module.unfinished"]["status"], "sorry")
+        for decl in decls.values():
+            self.assertGreater(decl["startLine"], 0, decl["name"])
+            self.assertGreaterEqual(decl["endLine"], decl["startLine"], decl["name"])
+
     def test_inductive_kinds_match_their_source_keyword(self) -> None:
         """A structure/class/inductive is labeled by its own keyword — the
         review document prints the label, so an `inductive` must not say

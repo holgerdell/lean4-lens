@@ -1,3 +1,4 @@
+-- MODULE_HEADER
 /-
 `review_cone.lean` — emit exact, elaborator-derived declaration data as JSON.
 
@@ -13,8 +14,8 @@ Project-independent by construction:
     that config is a root) — no in-source attribute, no hardcoded allowlist, no
     paper cross-reference file;
   * the project's libraries are discovered from its `lakefile` and imported
-    dynamically at run time (no static `import` of project code), so this one
-    file works unmodified in any Lean project;
+    dynamically at run time (no static `import` of project code), so the same
+    template serves any Lean project;
   * it imports Lean core only, so a project without Mathlib works too;
   * it elaborates on Lean v4.19 and up. Where core's string API moved under it
     (`String.ofList`, `trimAscii`, `drop`, `dropEnd`), the helpers below stand
@@ -34,6 +35,9 @@ Project-independent by construction:
                             must trust, a proof being trusted via the kernel.
                             Neither answer is the other's; do not "fix" one into
                             the other (optional; default: the document's).
+      REVIEW_CONE_IMPORTS   comma-separated exact modules to import instead of
+                            scanning libraries (optional; cone mode only).
+                            Project classification still uses all prefixes.
       REVIEW_CONE_PREFIXES  comma-separated namespace prefixes counting as
                             "project" (optional; default: the library names)
       REVIEW_CONE_OUT       output JSON path (optional; default: review_cone.json)
@@ -42,13 +46,20 @@ Run it from the project root once the project is built:
 
     lake env lean --run <this file>
 
-`lean4-lens review-cone` orchestrates that (build → run → render) for you.
+`lean4-lens review-cone` orchestrates that (build → run → render) for you,
+and replaces the module/import-level markers on supported toolchains.
 -/
 import Lean
 
 open Lean Elab Meta
 
 namespace ReviewCone
+
+/-- Report import and traversal progress even during slow runs. -/
+def progress (message : String) : IO Unit := do
+  IO.eprintln s!"review_cone: {message}"
+  (← IO.getStderr).flush
+
 
 /-- A module is "project" iff it lives under one of the configured namespace
 prefixes (from `REVIEW_CONE_PREFIXES`, or the library names). -/
@@ -532,7 +543,8 @@ partial def pruneMissingOleans (root : System.FilePath) (mods : Array Name) :
   return mods.filter (!blame.contains ·)
 
 /-- Import `mods` in one batch. Missing-`.olean` chains are already excluded
-(`pruneMissingOleans`), so the one failure recovered from here is two leaf
+(`pruneMissingOleans`). Server imports of legacy entry modules retry with
+private data. The other recovered failure is two leaf
 modules that each privately `@[expose]`-unfold the same third module clashing
 on the auto-generated duplicate private copy (the module system never expects
 two modules' `.private` content to coexist in one flat environment; a normal
@@ -540,17 +552,22 @@ one-file-at-a-time build never hits this). Recover by pruning the offender and
 everything that (transitively, per `directImports`) reaches it, then retrying
 — capped by `fuel` so an unrelated import failure still surfaces as an error
 instead of looping. -/
-unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : Nat) :
+unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : Nat) (privateOnly : Bool := false) :
     IO (Environment × Array Name) := do
   try
     -- a failed `importModules (loadExts := true)` clears the "initializers
     -- enabled" flag it needs, so a retry must re-arm it first.
     enableInitializersExecution
     let env ← importModules (mods.map (fun m => { module := m })) {}
-      (trustLevel := 0) (loadExts := true)
+      (trustLevel := 0) (loadExts := true) -- IMPORT_LEVEL
     return (env, mods)
   catch e =>
     if fuel == 0 then throw e
+    -- Modern server imports reject legacy non-module entry files. Retry once
+    -- with full data; other errors must still surface through normal handling.
+    if !privateOnly && (toString e).startsWith "cannot import non-`module` " then
+      progress "legacy entry module detected; retrying with private module data …"
+      return ← pruneAndImport root mods (fuel - 1) true
     -- TOOLCHAIN-COUPLED: no API reports which module clashed, so the offender
     -- is parsed out of core's "import <M> failed, environment already
     -- contains <decl>" message; a rewording downgrades this to a hard error.
@@ -571,7 +588,7 @@ unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : N
       for m in mods do
         if banned.contains m then
           IO.eprintln s!"review_cone: skipping {m} — clashes with an already-imported module on a duplicate private declaration"
-      pruneAndImport root kept (fuel - 1)
+      pruneAndImport root kept (fuel - 1) privateOnly
     | _ => throw e
 
 unsafe def run : IO Unit := do
@@ -599,18 +616,28 @@ unsafe def run : IO Unit := do
   let prefixNames := (match (← IO.getEnv "REVIEW_CONE_PREFIXES") with
     | some s => splitComma s
     | none => libs).map (String.toName ·) |>.toArray
-  -- every module of every library, imported dynamically
+  -- Explicit entry modules, or every module of every library.
   let mut mods : Array Name := #[]
-  for lib in libs do
-    mods := mods ++ (← libModules root lib)
+  match (← IO.getEnv "REVIEW_CONE_IMPORTS") with
+  | some names =>
+    if depMode then
+      throw <| IO.userError "review_cone: narrowed imports are not supported in dependency mode"
+    mods := (splitComma names).map (String.toName ·) |>.toArray
+  | none =>
+    for lib in libs do
+      mods := mods ++ (← libModules root lib)
   mods ← pruneMissingOleans root mods
   if mods.isEmpty then
     throw <| IO.userError s!"review_cone: no modules found under libraries {libs}"
   -- `loadExts := true` folds imported environment-extension data (structure
   -- info, declaration ranges, …); it uses the interpreter, so initializers must
-  -- be enabled first. Default `level := .private` loads all module data.
+  -- be enabled first. The driver selects `.server` for modern review cones;
+  -- dependency graphs and legacy toolchains retain the default `.private`.
   enableInitializersExecution
+  let importStart ← IO.monoMsNow
+  progress s!"importing {mods.size} modules …"
   let (env, prunedMods) ← pruneAndImport root mods 20
+  progress s!"import complete ({(← IO.monoMsNow) - importStart} ms)"
   -- every config root must resolve to a project declaration; a typo fails here
   let bad := rootNames.filter fun n =>
     match env.find? n with
@@ -618,7 +645,11 @@ unsafe def run : IO Unit := do
     | none => true
   if !bad.isEmpty then
     throw <| IO.userError s!"review_cone: these review-cone.toml roots are not project declarations: {bad.toList}"
+  let traversalStart ← IO.monoMsNow
+  progress (if depMode then "collecting proof references and checking axioms …"
+    else "collecting statements and checking axioms …")
   let json ← runMeta env (emitJson prefixNames root.toString rootNames depMode)
+  progress s!"traversal complete ({(← IO.monoMsNow) - traversalStart} ms)"
   let out := (← IO.getEnv "REVIEW_CONE_OUT").getD "review_cone.json"
   IO.FS.writeFile out json
   let what := if depMode then "every project decl, proofs included" else s!"{rootNames.size} roots"

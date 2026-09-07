@@ -48,6 +48,7 @@ class ReviewConeConfig(TypedDict):
     roots: list[str]
     title: str | None
     out: str | None
+    imports: list[str] | None
 
 
 DEFAULT_INFO_HEADING = "Full source code"
@@ -184,7 +185,15 @@ def load_config(path: Path) -> ReviewConeConfig:
     out = raw.get("out")
     if out is not None and not isinstance(out, str):
         raise ConfigError("`out` must be a string path")
+    imports = raw.get("imports")
+    if imports is not None and (
+        not isinstance(imports, list)
+        or not imports
+        or any(not isinstance(m, str) or not m.strip() or "," in m for m in imports)
+    ):
+        raise ConfigError("`imports` must be a non-empty list of module names")
     return {
+        "imports": imports,
         "sections": sections,
         "support": support,
         "info": _read_info(raw),

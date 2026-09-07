@@ -123,6 +123,22 @@ The optional `[info]` table adds a panel under the verification panel pointing
 a reader at the full sources. `url` is required; `heading` and `text` have the
 defaults shown. Leave the table out and no panel is rendered.
 
+For a focused review, an optional top-level `imports` array names the exact
+modules to build and import, for example `imports = ["MyProject.Main"]`.
+Their transitive imports remain available, and declarations are still classified
+using all project libraries. Every configured root must resolve; a missing root
+fails the run. Omit `imports` to scan all library modules as before. Dependency
+graph generation always scans the whole project and ignores this setting.
+
+On recognized Lean 4.32+ release toolchains, the driver uses a module-based
+emitter and loads server metadata for review documents, preserving source ranges
+and cached axiom dependencies without loading private proof bodies. Dependency
+graphs still load private bodies to discover proof references. Older or custom
+toolchains use the legacy emitter. Legacy entry modules automatically fall back
+to private imports. Import and traversal progress is streamed to
+stderr, including elapsed time for each stage; toolchain startup precedes the
+first import message.
+
 A project may keep several review documents: every `review-cone*.toml` is a
 config in its own right (`--config` selects one), each emitting JSON and HTML
 named after itself. `refs`' default roots are the union of them all.
