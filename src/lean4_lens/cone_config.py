@@ -121,9 +121,8 @@ def load_config(path: Path) -> ReviewConeConfig:
       * every `[section.titles]`, `[section.labels]` and `[section.summaries]`
         key is one of that section's decls, with a string value (a value that parsed to a dict
         means an *unquoted* dotted key — Lean names contain dots — which TOML
-        silently nests). A label ("Theorem 1") replaces the kind and the Lean
-        name in the entry's heading; a summary is a prose paragraph shown
-        above the entry's source;
+        silently nests). A label ("Theorem 1") replaces the Lean name or accompanies the display
+        title in the entry's heading; a summary is a prose shown beside the entry's source;
       * the optional `[info]` table, when present, has a non-empty string
         `url` (plus optional `heading`/`text`) — it renders the panel that
         points a reader at the full sources."""

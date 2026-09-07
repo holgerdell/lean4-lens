@@ -355,26 +355,49 @@ def status_badge(d: ConeDecl) -> str:
     return ""
 
 
-def render_decl(d: ConeDecl, body_html: str, title: str = "", label: str = "", summary: str = "") -> str:
-    """One declaration's entry — every decl renders through this, in whatever
-    section it lands. With a display title from `[section.titles]` the heading
-    is that title and `<kind> <name> [badge]` follows on a secondary line;
-    without one the heading is `<kind> <name> [badge]` itself. A label from
-    `[section.labels]` ("Theorem 1") replaces the kind and the name, which the
-    source body below already shows. A summary from `[section.summaries]` is a
-    prose paragraph placed before the source body."""
-    name = d.name
-    if label:
-        head_html = f"<strong class='label'>{html.escape(label)}</strong>"
-    else:
-        head_html = f"<span class='head'>{html.escape(d.kind)}</span> <strong class='self'>{html.escape(name)}</strong>"
-    head_line = f"{head_html} {status_badge(d)}"
-    if title:
-        heading = f"<h3 id='{anchor_id(name)}'>{html.escape(title)}</h3><div class='subhead'>{head_line}</div>"
-    else:
-        heading = f"<h3 id='{anchor_id(name)}'>{head_line}</h3>"
-    summary_html = f"<p class='summary'>{html.escape(summary)}</p>" if summary else ""
-    return f"<div class='entry'>{heading}{summary_html}{body_html}</div>"
+def prose_html(text: str) -> str:
+    """Escape authored prose, supporting paragraphs and inline code only."""
+    paragraphs = []
+    for paragraph in re.split(r"\n\s*\n", text.strip()):
+        if not paragraph:
+            continue
+        pieces = re.split(r"(`[^`]+`)", paragraph)
+        body = "".join(
+            f"<code>{html.escape(piece[1:-1])}</code>" if i % 2 else html.escape(piece)
+            for i, piece in enumerate(pieces)
+        )
+        paragraphs.append(f"<p class='summary'>{body}</p>")
+    return "".join(paragraphs)
+
+
+def split_docstring(snippet: str) -> tuple[str, str]:
+    """Move only a leading declaration docstring into the prose column.
+
+    Use the Lean scanner so nested comments cannot consume declaration code.
+    Field docs and comments within the definition stay with their source.
+    """
+    for lo, hi, kind in iter_spans(snippet):
+        if not snippet[lo:hi].strip():
+            continue
+        if kind == "comment" and snippet[lo:hi].startswith("/--"):
+            return snippet[lo + 3:hi - 2].strip(), snippet[hi:].lstrip("\n\r")
+        break
+    return "", snippet
+
+
+def render_decl(
+    d: ConeDecl, body_html: str, title: str = "", label: str = "", summary: str = "", source_html: str = ""
+) -> str:
+    """A shared title row, then readable prose beside always-visible Lean."""
+    heading = " — ".join(part for part in (label, title) if part) or d.name
+    # Success is stated once for the document. Exceptions remain visible locally.
+    badge = status_badge(d) if d.status != "verified" else ""
+    return (
+        f"<article class='entry entry-pair' id='{anchor_id(d.name)}'>"
+        f"<div class='entry-heading'><h3>{html.escape(heading)}{badge}</h3>{source_html}</div>"
+        f"<div class='annotation'>{prose_html(summary)}</div>"
+        f"<div class='lean'>{body_html}</div></article>"
+    )
 
 
 _OPENERS = "([{⟨⦃"
@@ -449,7 +472,13 @@ def read_snippet(
     # That `:=` is the one at bracket depth 0: a `:=` inside binders (autoparams
     # `(h : P := by …)`), a set-builder `{u | let x := …}`, or a comment/string
     # belongs to the statement, not the proof, and must not truncate it.
-    if d.kind == "theorem":
+    # Some cached module-interface exports classify theorem constants as axioms.
+    # The source keyword still identifies which value is a proof, not a definition.
+    source_theorem = re.search(
+        r"^\s*(?:(?:private|protected|noncomputable)\s+)*theorem\b",
+        blank_comments_and_strings("\n".join(block)), re.M,
+    )
+    if d.kind == "theorem" or (d.kind == "axiom" and source_theorem):
         cut = _statement_value_split(block)
         if cut is not None:
             c_idx, c_col = cut
@@ -751,130 +780,96 @@ def linkify(src: str, ctx: LinkCtx) -> str:
 
 CSS = """
 :root {
-  --font-sans: -apple-system, system-ui, sans-serif;
-  --font-mono: ui-monospace, monospace;
-  --font-code: 'JuliaMono','DejaVu Sans Mono', ui-monospace, monospace;
-  --fs-xs: .72rem; --fs-sm: .8rem; --fs-base: .9rem; --fs-lg: 1.1rem;
-  --fs-xl: 1.5rem; --fs-2xl: 1.6rem;
-  --lh: 1.4; --fw-semibold: 600;
-  --radius-sm: 4px; --radius: 6px; --radius-lg: 8px;
-  --gray-100: #eee; --gray-400: #6b6b6b; --gray-500: #777; --gray-600: #555;
-  --gray-700: #444; --gray-900: #1a1a1a;
-  --link-proj: #0b6bcb; --link-mlib: #8a5a00; --self: #b21f66; --cmt: #5f6368;
-  --pre-bg: #f7f7f9; --pre-border: #e3e3e8; --code-ax-bg: rgba(0,0,0,.05);
-  --white: #fff;
-  --ok: #1a7a1a; --ok-bg: #e3f5e3; --ok-panel-bg: #eef8ee; --ok-panel-border: #b6e0b6;
-  --ok-pill-bg: #cdeccd; --ok-pill-fg: #145214;
-  --warn: #9a6700; --warn-bg: #fdf0d5; --warn-icon: #b8860b;
-  --warn-panel-bg: #fdf6e3; --warn-panel-border: #ecd9a6;
-  --warn-pill-bg: #f3e4bd; --warn-pill-fg: #7a5200;
-  --bad: #b21f1f; --bad-bg: #fbe1e1; --bad-icon: #c62828;
-  --bad-panel-bg: #fdecec; --bad-panel-border: #f0bcbc;
-  --bad-pill-bg: #f6cccc; --bad-pill-fg: #8a1515;
-  --info-panel-bg: #eef4fb; --info-panel-border: #c3dbf3;
+  --page-bg: #faf9f6; --section-bg: #f0f1ec; --text: #242a30;
+  --muted: #65736c; --accent: #183f33; --link: #245c58;
+  --rule: #dfe3db; --font-heading: Georgia, serif;
+  --font-code: 'JuliaMono', 'DejaVu Sans Mono', ui-monospace, monospace;
+  font: 16px/1.65 system-ui, sans-serif; color: var(--text); background: var(--page-bg);
 }
-@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
-body { font-family: var(--font-sans); max-width: 1240px; overflow-wrap: anywhere;
-       margin: 2rem auto; padding: 0 1rem; color: var(--gray-900); line-height: var(--lh); }
-h1 { font-size: var(--fs-2xl); } h2 { margin-top: 2.5rem; border-bottom: 2px solid var(--gray-100); }
-main h2:first-child { margin-top: 0; }
-.layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 2rem; align-items: start; }
-.side { position: sticky; top: 0; max-height: 100vh; overflow-y: auto; padding: .5rem .5rem .5rem 0;
-        font-size: var(--fs-sm); border-right: 1px solid var(--gray-100); }
-.side h2 { font-size: var(--fs-base); border: 0; margin-top: 0; }
-.side details > summary { display: none; }
-.side ul { list-style: none; padding-left: 0; margin: .2rem 0 .6rem; }
-.side li { margin: .12rem 0; }
-.side li a { display: block; padding: .1rem .4rem; border-radius: var(--radius-sm); color: var(--link-proj);
-             text-decoration: none; box-shadow: inset 3px 0 0 transparent; }
-.side li a:hover { text-decoration: underline; }
-.side li a.current { background: var(--info-panel-bg); color: var(--gray-900);
-                     box-shadow: inset 3px 0 0 var(--link-proj); }
-.side .kind { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--gray-500); }
-@media (max-width: 860px) {
-  .layout { display: block; }
-  .side { position: static; max-height: none; border: 0; }
-  .side details > summary { display: list-item; cursor: pointer; font-weight: var(--fw-semibold); padding: .4rem 0; }
+* { box-sizing: border-box; }
+body { max-width: 1480px; padding: 22px 56px 64px; margin: auto; overflow-wrap: anywhere; }
+a { color: var(--link); text-underline-offset: 3px; }
+a:focus-visible, summary:focus-visible, pre:focus-visible { outline: 3px solid #b87a39; outline-offset: 3px; }
+summary { cursor: pointer; }
+h1 { font: 400 30px/1.25 var(--font-heading); margin: 8px 0 12px; }
+.intro { font-size: 15px; margin: 0 0 12px; }
+.about, .verification { font-size: 13px; margin: 10px 0; }
+.about p { max-width: 85ch; }
+.verification > summary { color: var(--accent); }
+.prov { color: var(--muted); font-size: 12px; }
+.contents { display: flex; flex-wrap: wrap; gap: 12px 26px; padding: 14px 0 26px; }
+.contents a { font-size: 13px; text-decoration: none; }
+.contents a:hover { text-decoration: underline; }
+.review-section { background: var(--section-bg); }
+.review-section + .review-section { margin-top: 80px; }
+.section-heading { padding: 28px 24px 22px; scroll-margin-top: 16px; }
+.section-title { display: flex; align-items: baseline; gap: 12px; font-family: var(--font-heading); }
+.section-title h2 { font: 400 25px/1.4 var(--font-heading); color: var(--accent); margin: 0; }
+.section-count { font-size: 12px; color: #72837a; }
+.section-description { margin: 6px 0 0; font-size: 13px; color: var(--muted); }
+.entry-pair { position: relative; display: grid; grid-template-columns: minmax(0,44%) minmax(0,56%); }
+.entry-pair > * { min-width: 0; }
+.entry-pair + .entry-pair::before {
+  content: ''; position: absolute; top: 0; left: 24px; right: 24px; height: 1px; background: var(--rule);
 }
-.entry { margin: 2.2rem 0; padding: .5rem 0; }
-.entry h3 { margin: .2rem 0; font-size: var(--fs-lg); }
-.subhead { font-family: var(--font-mono); font-size: var(--fs-sm); margin: .1rem 0 .4rem; color: var(--gray-700); }
-.summary { margin: .3rem 0 .5rem; font-size: var(--fs-base); }
-.prov { font-size: var(--fs-sm); color: var(--gray-600); }
-.desc { color: var(--gray-600); font-size: var(--fs-base); margin: .2rem 0 .1rem; }
-.codeblock { margin: .6rem 0 1rem; }
-.codeblock pre { margin: 0; }
-.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .2rem 1.5rem;
-        font-size: var(--fs-sm); color: var(--gray-600); margin: .3rem 0 0; }
-.code-meta { font-family: var(--font-mono); font-size: var(--fs-sm); order: 2; margin-left: auto; }
-a.src { color: var(--link-proj); }
-pre { background: var(--pre-bg); border: 1px solid var(--pre-border); border-radius: var(--radius);
-      padding: .7rem .9rem; overflow-x: auto; font-size: var(--fs-base);
-      font-family: var(--font-code); }
-pre code { font-family: inherit; }
-a.proj { color: var(--link-proj); }
-a.mlib { color: var(--link-mlib); }
-a.proj, a.mlib, a.src { text-decoration: underline; text-decoration-color: rgba(0,0,0,.25);
-                        text-underline-offset: .18em; }
-a.proj:hover, a.mlib:hover, a.src:hover { text-decoration-color: currentColor; }
-pre a.proj, pre a.mlib { text-decoration: none; }
-pre a.proj:hover, pre a.mlib:hover { text-decoration: underline; }
-a.field { text-decoration-style: dotted; }
-.sample { text-decoration: underline; }
-.proj.sample { color: var(--link-proj); }
-.mlib.sample { color: var(--link-mlib); }
-a:focus-visible, pre:focus-visible { outline: 3px solid #ffbf47; outline-offset: 2px; }
-strong.self { color: var(--self); }
-strong.label { font-weight: var(--fw-semibold); }
-.cmt { color: var(--cmt); font-style: italic; }
-.proof, .proof a { color: var(--gray-400); }
-.head { color: var(--gray-500); font-size: var(--fs-sm); }
-.paperref { font-size: var(--fs-sm); color: var(--gray-500); }
-.tocgroup { font-weight: var(--fw-semibold); color: var(--gray-700); margin: .4rem 0 .15rem; }
-.paper { margin-top: 1.6rem; }
-.paper > h3 { font-size: var(--fs-lg); margin: .3rem 0; }
-.badge { display: inline-block; font-size: var(--fs-xs); font-weight: var(--fw-semibold);
-         border-radius: var(--radius-sm); padding: 0 .45rem; margin-left: .5rem; vertical-align: middle; }
-.badge.verified { background: var(--ok-bg); color: var(--ok); }
-.badge.tainted { background: var(--warn-bg); color: var(--warn); }
-.badge.sorry { background: var(--bad-bg); color: var(--bad); }
-.axioms { font-size: var(--fs-xs); color: var(--warn); font-family: var(--font-mono); margin-left: .35rem; }
-.mlist { column-count: 2; font-size: var(--fs-base); } .mlist a { color: var(--link-mlib); }
-.trunc { color: var(--gray-400); font-style: italic; }
-.usedby { margin: 0; flex: 1 1 60%; }
-.usedby-label { font-weight: var(--fw-semibold); margin-right: .3rem; }
-.usedby details { display: inline; }
-.usedby summary { display: inline; cursor: pointer; list-style: none; }
-.usedby summary::-webkit-details-marker { display: none; }
-.usedby summary::after { content: ' ▸'; font-size: .8em; }
-.usedby details[open] summary::after { content: ' ▾'; }
-.usedby details[open] summary { display: block; margin-bottom: .15rem; }
-.subtitle { font-size: var(--fs-lg); color: var(--gray-600); margin: -.4rem 0 1.2rem; }
-.vpanel { display: flex; gap: .85rem; align-items: flex-start; border-radius: var(--radius-lg);
-          border: 1px solid; padding: .8rem 1rem; margin: 1.4rem 0; }
-.vpanel.ok { background: var(--ok-panel-bg); border-color: var(--ok-panel-border); }
-.vpanel.warn { background: var(--warn-panel-bg); border-color: var(--warn-panel-border); }
-.vpanel.sorry { background: var(--bad-panel-bg); border-color: var(--bad-panel-border); }
-.vpanel.info { background: var(--info-panel-bg); border-color: var(--info-panel-border); }
-.vpanel-icon { font-size: var(--fs-xl); line-height: var(--lh); flex: none; width: 1.9rem;
-               height: 1.9rem; display: flex; align-items: center;
-               justify-content: center; border-radius: 50%; color: var(--white); }
-.vpanel.ok .vpanel-icon { background: var(--ok); }
-.vpanel.warn .vpanel-icon { background: var(--warn-icon); }
-.vpanel.sorry .vpanel-icon { background: var(--bad-icon); }
-.vpanel.info .vpanel-icon { background: var(--link-proj); }
-.vpanel-head { font-weight: var(--fw-semibold); font-size: var(--fs-lg); }
-.vpanel-pills { margin: .35rem 0 .1rem; }
-.vpanel-sub { font-size: var(--fs-base); color: var(--gray-700); margin-top: .2rem; }
-.vpanel-foot { font-size: var(--fs-xs); color: var(--gray-500); font-family: var(--font-mono);
-               margin-top: .5rem; }
-.pill { display: inline-block; font-size: var(--fs-sm); font-weight: var(--fw-semibold);
-        border-radius: 20px; padding: .1rem .6rem; margin-right: .4rem; }
-.pill.verified { background: var(--ok-pill-bg); color: var(--ok-pill-fg); }
-.pill.tainted { background: var(--warn-pill-bg); color: var(--warn-pill-fg); }
-.pill.sorry { background: var(--bad-pill-bg); color: var(--bad-pill-fg); }
-code.ax { background: var(--code-ax-bg); border-radius: var(--radius-sm); padding: 0 .3rem;
-          margin: 0 .12rem; font-size: .8em; }
+.entry-heading { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 14px; padding: 24px 24px 20px; }
+.entry-heading h3 { font: 500 19px/1.4 var(--font-heading); margin: 0; }
+.heading-source { margin-left: auto; font-size: 11px; text-align: right; max-width: 55%; }
+.heading-source a { color: var(--muted); text-decoration: none; }
+.heading-source a:hover { color: var(--link); text-decoration: underline; }
+.annotation { padding: 0 24px 28px; font: 17px/1.7 var(--font-heading); }
+.summary { margin: 0 0 16px; }
+.summary:last-child { margin-bottom: 0; }
+.summary code { font: .85em/1.6 var(--font-code); }
+.lean { padding: 0 24px 28px; }
+pre { margin: 0; font: 13px/1.8 var(--font-code); white-space: pre-wrap; overflow-wrap: anywhere; }
+pre code { font: inherit; }
+pre a { color: #376f80; text-decoration: none; }
+pre a:hover { text-decoration: underline; }
+strong.self { color: #30383c; font-weight: 600; }
+.cmt, .proof, .proof a, .trunc { color: var(--muted); }
+.cmt, .trunc { font-style: italic; }
+.usedby { font-size: 12px; color: var(--muted); margin-top: 16px; }
+.usedby a { overflow-wrap: anywhere; }
+.entry-pair:target { outline: 2px solid #aec2b4; outline-offset: 3px; scroll-margin-top: 18px; }
+.badge, .pill { font: 600 12px/1.6 system-ui, sans-serif; padding: 2px 6px; border-radius: 4px; }
+.badge { margin-left: 8px; }
+.tainted { background: #f3e4bd; color: #7a5200; }
+.sorry { background: #f6cccc; color: #8a1515; }
+.verified { background: #e3f5e3; color: #145214; }
+.axioms { font: 12px/1.6 var(--font-code); color: #7a5200; margin-left: 6px; }
+.vpanel { display: flex; gap: 12px; padding: 16px; margin: 16px 0; border-radius: 6px; }
+.vpanel.ok { background: #eef4ec; }
+.vpanel.warn { background: #fdf6e3; }
+.vpanel.sorry { background: #fdecec; }
+.vpanel.info { background: #eef4f5; }
+.vpanel-head { font-weight: 600; }
+.vpanel-sub { font-size: 14px; margin-top: 6px; }
+.vpanel-foot { font-size: 12px; color: var(--muted); margin-top: 10px; }
+.vpanel-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+code.ax { margin-right: 8px; }
+@media (max-width: 900px) { body { padding-left: 24px; padding-right: 24px; } }
+@media (max-width: 700px) {
+  body { padding-left: 18px; padding-right: 18px; }
+  .review-section + .review-section { margin-top: 56px; }
+  .section-heading { padding-left: 20px; padding-right: 20px; }
+  .section-title { flex-wrap: wrap; gap: 3px 10px; }
+  .section-title h2 { font-size: 23px; }
+  .entry-pair { grid-template-columns: minmax(0,1fr); }
+  .entry-heading { flex-wrap: wrap; padding-left: 20px; padding-right: 20px; }
+  .entry-heading h3 { font-size: 18px; }
+  .heading-source { margin-left: 0; max-width: 100%; text-align: left; }
+  .annotation { padding: 0 20px 18px; }
+  .lean { padding: 0 20px 24px; }
+  pre { font-size: 12px; }
+  .entry-pair + .entry-pair::before { left: 20px; right: 20px; }
+}
+@media print {
+  body { padding: 0; max-width: none; }
+  .contents, .about, .usedby { display: none; }
+  .review-section { background: none; }
+  .entry-heading { break-after: avoid; }
+}
 """
 
 
@@ -915,7 +910,7 @@ def render(
     # Read each decl's source once; the cache reads each *module* once.
     module_lines: dict[str, list[str]] = {}
     for d in project:
-        d.snippet, d.truncated = read_snippet(lean_root, d, cache=module_lines)
+        d.snippet, d.truncated = read_snippet(lean_root, d, max_lines=sys.maxsize, cache=module_lines)
 
     # Reverse dependency map: for each project decl, who in the cone uses it.
     # A ref to a structure field counts as a use of the parent struct
@@ -937,13 +932,10 @@ def render(
         items = ", ".join(
             f"<a class='proj' href='#{anchor_id(n)}'>{html.escape(n)}</a>" for n in sorted(users, key=str.lower)
         )
-        label = "<span class='usedby-label'>Used by</span>"
-        if len(users) > 3:
-            return (
-                f"<div class='usedby'><details><summary>{label} {len(users)} declarations</summary>"
-                f"{items}</details></div>"
-            )
-        return f"<div class='usedby'>{label} {items}</div>"
+        return (
+            f"<details class='usedby'><summary>Used by {len(users)} declarations</summary>"
+            f"{items}</details>"
+        )
 
     # --- Reading order: topological build-up (dependencies first) -------------
     def dep_edges(d: ConeDecl) -> list[str]:
@@ -998,7 +990,7 @@ def render(
     support = topo_sort([d for d in project if d.name not in placed], key=lambda d: d.name.lower())
     support_title = config["support"]["title"]
 
-    def _body(d: ConeDecl) -> str:
+    def _entry(d: ConeDecl) -> str:
         name = d.name
         local_by_final: dict[str, set[str]] = {}
         local_by_qfinal: dict[str, set[str]] = {}
@@ -1015,18 +1007,22 @@ def render(
             local_qual_final={f: next(iter(s)) for f, s in local_by_qfinal.items() if len(s) == 1},
             binders=local_binders(d.snippet),
         )
-        snippet = d.snippet
+        docstring, snippet = split_docstring(d.snippet)
         body = linkify(snippet, ctx) if snippet else "<span class='trunc'>(source not found)</span>"
         tag = " <span class='trunc'>… (truncated)</span>" if d.truncated else ""
         file_disp = module_path(d.module).as_posix()
         href = html.escape(f"{src_prefix}{urllib.parse.quote(file_disp)}#L{d.start_line}")
-        meta = (
-            f"<span class='code-meta'><a class='src' href='{href}' title='open source file'>"
-            f"{html.escape(file_disp)}</a> · {d.start_line}–{d.end_line}</span>"
+        source = (
+            f"<span class='heading-source'><a class='src' href='{href}' "
+            f"title='{html.escape(file_disp)} · lines {d.start_line}–{d.end_line}'>"
+            f"{html.escape(file_disp)} ↗</a></span>"
         )
-        return (
-            f"<div class='codeblock'><pre tabindex='0'><code>{body}{tag}</code></pre></div>"
-            f"<div class='foot'>{meta}{used_by_html(d)}</div>"
+        body_html = (
+            f"<pre tabindex='0'><code>{body}{tag}</code></pre>{used_by_html(d)}"
+        )
+        return render_decl(
+            d, body_html, title_map.get(name, ""), label_map.get(name, ""),
+            summary_map.get(name) or docstring, source,
         )
 
     st_counts = Counter(d.status for d in project)
@@ -1076,6 +1072,12 @@ def render(
             f"{panel_tail}"
         )
 
+    if all_verified:
+        panel = (
+            f"<details class='verification'><summary>✓ All {n_total} declarations kernel-checked"
+            f" · Verification details</summary>{panel}</details>"
+        )
+
     def toc_label(d: ConeDecl) -> str:
         parts = [p for p in (label_map.get(d.name), title_map.get(d.name) or d.name) if p]
         return html.escape(" — ".join(parts))
@@ -1106,7 +1108,10 @@ def render(
         "<meta name='viewport' content='width=device-width, initial-scale=1'>",
         f"<title>{html.escape(title)}</title>",
         f"<style>{CSS}</style></head><body>",
-        f"<h1>Lean 4 formalization of <em>{html.escape(ptitle)}</em></h1>",
+        f"<header class='page-heading'><h1>Lean 4 formalization of <em>{html.escape(ptitle)}</em></h1>",
+        "<p class='intro'>Compare each mathematical statement with its Lean declaration. "
+        "Follow linked terms to their definitions below.</p>",
+        "<details class='about'><summary>About this review</summary>",
         "<p>Lean's type checker guarantees the proofs are logically correct, but "
         "not that the theorem <em>statements</em> actually express the intended "
         "mathematics &mdash; a formalization can type-check yet fail to capture the "
@@ -1120,9 +1125,8 @@ def render(
         f"<p>The {spell(n_headline)} results are grouped into sections"
         + (f" &mdash; {order_prose}" if order_prose else "")
         + support_prose
-        + ". The defined name is <strong class='self'>bold pink</strong> at its definition. "
-        "<span class='proj sample'>Blue links</span> jump within this document; "
-        "<span class='mlib sample'>brown links</span> open the mathlib4 docs.</p>",
+        + ". Links in Lean open declarations in this document or the mathlib documentation.</p>",
+        "</details>",
     ]
     parts.append(panel)
     info = config["info"]
@@ -1140,88 +1144,43 @@ def render(
     if rev:
         parts.append(f"<p class='prov'>Generated from repository revision <code>{html.escape(rev)}</code>.</p>")
 
-    # Sidebar contents: every section that opts in, then the support catch-all.
-    # A sticky column on wide screens; a disclosure (closed by default) on narrow.
-    def nav_item(d: ConeDecl, label: str) -> str:
-        return f"<li><a href='#{anchor_id(d.name)}'><span class='kind'>{html.escape(d.kind)}</span> {label}</a></li>"
+    parts.append("</header>")
 
-    toc_sections = [(t, e) for t, in_toc, e in section_entries if e and in_toc]
-    nav = []
-    for sec_title, entries in toc_sections:
-        nav.append(f"<div class='tocgroup'>{html.escape(sec_title)} ({len(entries)})</div><ul>")
-        nav.extend(nav_item(d, toc_label(d)) for d in entries)
-        nav.append("</ul>")
+    # Compact top navigation: primary declarations plus a support-section link.
+    nav: list[str] = []
+    for _, in_toc, entries in section_entries:
+        if in_toc:
+            nav.extend(f"<a href='#{anchor_id(d.name)}'>{toc_label(d)}</a>" for d in entries)
     if support and show_support_toc:
-        nav.append(
-            f"<div class='tocgroup'>{html.escape(support_title)} ({len(support)}), in dependency order</div><ul>"
-        )
-        nav.extend(nav_item(d, html.escape(d.name)) for d in support)
-        nav.append("</ul>")
-    n_nav = sum(len(e) for _, e in toc_sections) + (len(support) if show_support_toc else 0)
+        nav.append(f"<a href='#support'>{html.escape(support_title)} ({len(support)})</a>")
     if nav:
-        parts.append(
-            "<div class='layout'><nav class='side' aria-label='Contents'><details open>"
-            f"<summary>Contents ({n_nav} declarations)</summary><h2 id='contents'>Contents</h2>"
-            + "".join(nav)
-            + "</details></nav>"
+        parts.append("<nav class='contents' aria-label='Contents'>" + "".join(nav) + "</nav>")
+
+    def section_html(section_id: str, heading: str, entries: list[ConeDecl], note: str) -> str:
+        count = len(entries)
+        noun = "theorem" if all(d.kind == "theorem" for d in entries) else "declaration"
+        count_text = f"{count} {noun}{'' if count == 1 else 's'}"
+        return (
+            f"<section class='review-section' aria-labelledby='{section_id}-title'>"
+            f"<header class='section-heading' id='{section_id}'>"
+            f"<div class='section-title'><h2 id='{section_id}-title'>{html.escape(heading)}</h2>"
+            f"<span class='section-count'>{count_text}</span></div>"
+            f"<p class='section-description'>{html.escape(note)}</p></header>"
+            "<div class='table-body'>" + "".join(_entry(d) for d in entries) + "</div></section>"
         )
+
     parts.append("<main>")
-    for sec_title, _, entries in section_entries:
-        if not entries:
-            continue
-        parts.append(f"<h2>{html.escape(sec_title)}</h2>")
-        for d in entries:
-            parts.append(
-                render_decl(
-                    d, _body(d), title_map.get(d.name, ""), label_map.get(d.name, ""), summary_map.get(d.name, "")
-                )
-            )
+    for i, (sec_title, _, entries) in enumerate(section_entries):
+        if entries:
+            parts.append(section_html(f"section-{i}", sec_title, entries, "Statements and their Lean declarations."))
     if support:
-        parts.append(f"<h2>{html.escape(support_title)}</h2>")
-        for d in support:
-            parts.append(render_decl(d, _body(d)))
-    parts.append("</main>")
-    if nav:
-        parts.append("</div>" + SIDEBAR_JS)
-    parts.append("</body></html>")
+        parts.append(section_html(
+            "support", support_title, support,
+            "Definitions and supporting statements in dependency order. Descriptions default to source comments.",
+        ))
+    parts.append("</main></body></html>")
     return "".join(parts)
 
-
-# Marks the sidebar entry of the declaration currently in view, keeps that entry
-# visible by scrolling the sidebar alone, and folds the contents on narrow
-# screens (reopening it whenever the wide layout returns).
-SIDEBAR_JS = """<script>
-(function(){
-  const links=[...document.querySelectorAll('.side a[href^="#"]')];
-  const byId=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
-  const heads=[...byId.keys()].map(id=>document.getElementById(id)).filter(Boolean);
-  const side=document.querySelector('.side');
-  let current=null;
-  function setCurrent(id){
-    if(id===current) return; current=id;
-    links.forEach(a=>{a.classList.remove('current'); a.removeAttribute('aria-current');});
-    const a=byId.get(id); if(!a) return;
-    a.classList.add('current'); a.setAttribute('aria-current','location');
-    if(side.scrollHeight>side.clientHeight){
-      const r=a.getBoundingClientRect(), sr=side.getBoundingClientRect();
-      if(r.top<sr.top) side.scrollTop+=r.top-sr.top-8;
-      else if(r.bottom>sr.bottom) side.scrollTop+=r.bottom-sr.bottom+8;
-    }
-  }
-  function update(){
-    if(!heads.length) return;
-    const y=window.scrollY+Math.min(120,window.innerHeight/4);
-    let best=heads[0];
-    for(const h of heads){ if(h.offsetTop<=y) best=h; else break; }
-    setCurrent(best.id);
-  }
-  window.addEventListener('scroll',update,{passive:true}); window.addEventListener('resize',update); update();
-  const det=side.querySelector('details'), mq=window.matchMedia('(max-width: 860px)');
-  function layout(){ if(mq.matches){ if(!det.dataset.touched) det.open=false; } else det.open=true; }
-  det.addEventListener('toggle',()=>{ if(mq.matches) det.dataset.touched='1'; });
-  mq.addEventListener('change',layout); layout();
-})();
-</script>"""
 
 
 def main(argv: Sequence[str] | None = None) -> int:

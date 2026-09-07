@@ -1,4 +1,6 @@
 import json
+import re
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -146,9 +148,9 @@ def test_universe_annotated_name_is_linked() -> None:
     assert '<a class="proj" href="#d-TemporalGraph">TemporalGraph</a>.{0}' in linkify(src, ctx)
 
 
-def test_document_has_sidebar_contents_listing_support_by_default(tmp_path: Path) -> None:
+def test_document_has_top_navigation(tmp_path: Path) -> None:
     html = _render_fixture(tmp_path, 'title = "Fixture"\n', n_decls=2)
-    assert "<nav class='side' aria-label='Contents'>" in html
+    assert "<nav class='contents' aria-label='Contents'>" in html
     assert "<meta name='viewport'" in html and "<html lang='en'>" in html
     assert "kernel-checked" in html and "requires human review" in html
     assert "href='#'" not in html
@@ -169,7 +171,10 @@ def test_title_and_summary_lead_the_entry(tmp_path: Path) -> None:
     args = ["--project", str(tmp_path), "--json", str(data_path), "--config", str(config), "--out", str(out)]
     assert R.main(args) == 0
     html = out.read_text()
-    assert "<h3 id='d-Fixture_46main'>The main bound</h3><div class='subhead'>" in html
+    assert "<article class='entry entry-pair' id='d-Fixture_46main'>" in html
+    assert "<h3>The main bound</h3>" in html
+    assert "class='subhead'" not in html
+    assert "class='badge verified'" not in html
     assert "<p class='summary'>Every graph mixes fast.</p>" in html
 
 
@@ -251,3 +256,57 @@ def test_progress_and_large_stdout_are_both_preserved(tmp_path: Path, capsys: py
     assert len(proc.stdout) == 100001
     assert proc.stderr == "import complete\n"
     assert "import complete" in capsys.readouterr().err
+
+
+def test_docstring_moves_to_prose_without_touching_field_comments() -> None:
+    body = 'structure Sample where\n  /-- A /- nested -/ field comment. -/\n  value : Nat'
+    doc, source = R.split_docstring('/-- A /- nested -/ description. -/\n' + body)
+    assert doc == 'A /- nested -/ description.'
+    assert source == body
+    assert R.split_docstring(body) == ('', body)
+
+
+def test_prose_escapes_html_and_preserves_inline_code() -> None:
+    prose = R.prose_html('For `<x>` & y.\n\n<script>alert(1)</script>')
+    assert '<code>&lt;x&gt;</code> &amp; y.' in prose
+    assert '<script>' not in prose
+    assert prose.count("<p class='summary'>") == 2
+    assert R.prose_html("`unclosed") == "<p class='summary'>`unclosed</p>"
+
+
+def test_comparison_keeps_long_definitions_and_warnings_visible(tmp_path: Path) -> None:
+    source = '/-- Source description. -/\ndef longValue : Nat :=\n' + '  1 +\n' * 65 + '  0\n'
+    (tmp_path / 'Fixture.lean').write_text(source)
+    config_path = tmp_path / 'review-cone.toml'
+    config_path.write_text('[[section]]\ntitle="Results"\ndecls=["Fixture.longValue"]\n')
+    decl = {
+        'name': 'Fixture.longValue', 'module': 'Fixture', 'kind': 'def',
+        'startLine': 1, 'endLine': len(source.splitlines()), 'status': 'tainted', 'axioms': ['extra'],
+    }
+    result = R.render(
+        {'project': [decl], 'mathlib': []}, tmp_path, None, None,
+        C.load_config(config_path), True, '../',
+    )
+    code = re.search(r'<pre[^>]*><code>(.*?)</code></pre>', result, re.S)
+    assert code is not None
+    plain_code = unescape(re.sub(r'<[^>]*>', '', code.group(1)))
+    assert plain_code == source.split('-/\n', 1)[1].rstrip('\n')
+    assert result.count('Source description.') == 1
+    assert "class='annotation'><p class='summary'>Source description." in result
+    assert "class='badge tainted'" in result and 'extra' in result
+    assert "href='../Fixture.lean#L1'" in result and 'Fixture.lean ↗' in result
+    assert '<details' not in result[result.index("class='lean'"):result.index('</article>')]
+
+
+
+def test_interface_axiom_metadata_does_not_expose_theorem_proof(tmp_path: Path) -> None:
+    (tmp_path / "Fixture.lean").write_text(
+        "/-- A theorem, despite the interface metadata. -/\n"
+        "theorem result (h : True := by trivial) : True := by\n  exact h\n"
+    )
+    decl = ConeDecl.from_json({
+        "name": "Fixture.result", "module": "Fixture", "kind": "axiom", "startLine": 1, "endLine": 3,
+    })
+    snippet, truncated = R.read_snippet(tmp_path, decl)
+    assert snippet.endswith("theorem result (h : True := by trivial) : True")
+    assert "exact h" not in snippet and not truncated

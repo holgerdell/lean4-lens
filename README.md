@@ -108,18 +108,33 @@ project root) name the document itself; `--title`/`--out` override them, and
 without them the document is written next to the project as
 `<config-stem>.html`.
 
-Per section: `titles` gives a decl a display title (shown as the heading, with
-the kind and Lean name on a secondary line), `labels` replaces the kind and
-Lean name with something like "Theorem 1", `summaries` puts a prose paragraph
-above the decl's source, and `toc = false` keeps the section out of the
-contents sidebar. A dotted Lean name must be
+The document presents each section on one subtle background, with a shared
+entry title and filepath above two columns: prose on the left, always-visible
+Lean on the right. On small screens these stack. Inset rules separate entries;
+larger gaps separate sections. There is no sidebar. The approved design is
+archived at `prototype/review-layout` (commit `94d7d3d`,
+`prototypes/review-layout.html`); its decision record is in `prototypes/README.md`
+on that branch.
+
+Per section: `titles` gives a declaration its display heading; `labels` adds
+something like "Theorem 1" (or replaces the Lean name when no title is given).
+`summaries` supplies the prose beside the declaration, with blank lines for
+paragraphs and backticks for inline code. Without a summary, the renderer moves
+the leading source doc comment into the prose column. Field comments remain
+in the code. All prose is escaped; raw HTML is not interpreted. The declaration
+name is still present in Lean, and its filepath links to the original source.
+`toc = false` keeps the section's declarations out of the compact top navigation. A dotted Lean name must be
 quoted, or TOML reads it as a nested table.
 
 Cone members no section claims land in the `[support]` catch-all: rendered
-last in topological order, and listed in the contents sidebar unless
+last in topological order, with a section link in the top navigation unless
 `support.toc = false` (`--toc-support` overrides that).
 
-The optional `[info]` table adds a panel under the verification panel pointing
+Successful verification is summarized once, with axiom and version details
+available in a disclosure. Declarations with extra axioms or `sorry` still have
+visible local warnings. Reverse dependencies are available under “Used by”.
+
+The optional `[info]` table adds a panel under the verification summary pointing
 a reader at the full sources. `url` is required; `heading` and `text` have the
 defaults shown. Leave the table out and no panel is rendered.
 
