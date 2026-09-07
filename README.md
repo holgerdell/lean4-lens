@@ -65,7 +65,8 @@ read before what it depends on:
 The elaborator run needs `lake` on PATH. Options: `--no-build` skips the
 `lake build` warm-up, `--json FILE` re-renders JSON emitted earlier and skips
 the Lean run entirely, `--config`, `--out` and `--title` override the config,
-`--toc-support` forces the supporting declarations into the table of contents,
+`--toc-support` lists the supporting declarations in the contents even when
+the config hides them,
 and `--lean-root` points the source snippets at a different tree.
 
 ### Configuring the document
@@ -88,6 +89,9 @@ decls = ["main_theorem", "algorithm_correct"]
 [section.labels]
 "main_theorem" = "Theorem 1"
 
+[section.summaries]
+"main_theorem" = "For every input the algorithm returns a valid answer."
+
 [support]
 title = "Supporting declarations"
 toc = false
@@ -104,14 +108,16 @@ project root) name the document itself; `--title`/`--out` override them, and
 without them the document is written next to the project as
 `<config-stem>.html`.
 
-Per section: `titles` gives a decl a display title, `labels` replaces the kind
-and Lean name in its heading with something like "Theorem 1", and `toc = false`
-keeps the section out of the table of contents. A dotted Lean name must be
+Per section: `titles` gives a decl a display title (shown as the heading, with
+the kind and Lean name on a secondary line), `labels` replaces the kind and
+Lean name with something like "Theorem 1", `summaries` puts a prose paragraph
+above the decl's source, and `toc = false` keeps the section out of the
+contents sidebar. A dotted Lean name must be
 quoted, or TOML reads it as a nested table.
 
 Cone members no section claims land in the `[support]` catch-all: rendered
-last in topological order, and kept out of the table of contents unless
-`support.toc = true` (or `--toc-support`).
+last in topological order, and listed in the contents sidebar unless
+`support.toc = false` (`--toc-support` overrides that).
 
 The optional `[info]` table adds a panel under the verification panel pointing
 a reader at the full sources. `url` is required; `heading` and `text` have the

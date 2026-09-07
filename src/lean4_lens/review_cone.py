@@ -18,9 +18,10 @@ overrides) is the sole control surface. It lists an ordered set of `[[section]]`
 blocks, each with a `title` and a `decls` list of Lean names. EVERY named decl is
 a *root*: the cone is the transitive closure of them all, and named decls render
 in their section in the order written. Every other cone member falls into the
-implicit `[support]` catch-all (rendered last, topologically sorted, hidden from
-the table of contents unless `support.toc = true` or --toc-support). Optional
-display titles live in a section-local `[section.titles]` table; the document's
+implicit `[support]` catch-all (rendered last, topologically sorted, listed in
+the sidebar contents unless `support.toc = false`; --toc-support forces it on).
+Optional display titles and prose summaries live in section-local
+`[section.titles]` / `[section.summaries]` tables; the document's
 own `title` and `out` path (relative to the project root) are top-level keys,
 overridable with --title/--out. There is no in-source attribute and no
 paper/LaTeX coupling.
@@ -48,6 +49,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -217,8 +219,39 @@ def toolchain_info(lean_root: Path) -> str:
     return ", ".join(bits)
 
 
-_SMALL_NUMS = ["zero", "one", "two", "three", "four", "five", "six", "seven",
-               "eight", "nine", "ten", "eleven", "twelve"]
+def git_revision(lean_root: Path) -> str:
+    """Short revision of the checkout the snippets were read from, suffixed
+    `-dirty` when the tree has uncommitted changes; "" outside a checkout."""
+
+    def git(*args: str) -> str | None:
+        try:
+            r = subprocess.run(["git", "-C", str(lean_root), *args], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return r.stdout if r.returncode == 0 else None
+
+    rev = git("rev-parse", "--short", "HEAD")
+    if not rev:
+        return ""
+    status = git("status", "--porcelain")
+    return rev.strip() + ("-dirty" if status else "")
+
+
+_SMALL_NUMS = [
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+]
 
 
 def spell(n: int) -> str:
@@ -258,7 +291,10 @@ def summarize_axioms(axioms: list[str]) -> list[str]:
 def status_badge(d: ConeDecl) -> str:
     st = d.status
     if st == "verified":
-        return "<span class='badge verified' title='sorry-free; standard axioms only'>✓ Verified</span>"
+        return (
+            "<span class='badge verified' title='kernel-checked: sorry-free, standard axioms only'>"
+            "✓ Kernel-checked</span>"
+        )
     if st == "tainted":
         ax = ", ".join(summarize_axioms(d.axioms))
         return (
@@ -270,24 +306,26 @@ def status_badge(d: ConeDecl) -> str:
     return ""
 
 
-def render_decl(d: ConeDecl, body_html: str, title: str = "", label: str = "") -> str:
+def render_decl(d: ConeDecl, body_html: str, title: str = "", label: str = "", summary: str = "") -> str:
     """One declaration's entry — every decl renders through this, in whatever
-    section it lands: `<kind> <name> (optional title) [badge]`, then the source
-    body. A label from `[section.labels]` ("Theorem 1") replaces the kind and
-    the name, which the source body below already shows; the optional display
-    title comes from `[section.titles]`."""
+    section it lands. With a display title from `[section.titles]` the heading
+    is that title and `<kind> <name> [badge]` follows on a secondary line;
+    without one the heading is `<kind> <name> [badge]` itself. A label from
+    `[section.labels]` ("Theorem 1") replaces the kind and the name, which the
+    source body below already shows. A summary from `[section.summaries]` is a
+    prose paragraph placed before the source body."""
     name = d.name
-    title_html = f" <span class='title'>({html.escape(title)})</span>" if title else ""
     if label:
         head_html = f"<strong class='label'>{html.escape(label)}</strong>"
     else:
         head_html = f"<span class='head'>{html.escape(d.kind)}</span> <strong class='self'>{html.escape(name)}</strong>"
-    return (
-        f"<div class='entry'><h3 id='{anchor_id(name)}'>"
-        f"{head_html}"
-        f"{title_html} {status_badge(d)}</h3>"
-        f"{body_html}</div>"
-    )
+    head_line = f"{head_html} {status_badge(d)}"
+    if title:
+        heading = f"<h3 id='{anchor_id(name)}'>{html.escape(title)}</h3><div class='subhead'>{head_line}</div>"
+    else:
+        heading = f"<h3 id='{anchor_id(name)}'>{head_line}</h3>"
+    summary_html = f"<p class='summary'>{html.escape(summary)}</p>" if summary else ""
+    return f"<div class='entry'>{heading}{summary_html}{body_html}</div>"
 
 
 _OPENERS = "([{⟨⦃"
@@ -414,6 +452,43 @@ class LinkCtx:
     define_final: str
     local_final: dict[str, str]
     local_qual_final: dict[str, str]
+    binders: frozenset[str] = frozenset()
+
+
+# Names bound by a binder group: `(Vertex : Type*)`, `{V : Type*}`, `[inst : C]`,
+# `⦃x y : α⦄` in a declaration's header, and `∀ x : α` / `∃ n : ℕ` anywhere.
+_NAMES = r"((?:[A-Za-z_][A-Za-z0-9_'!?]*\s+)*[A-Za-z_][A-Za-z0-9_'!?]*)"
+_GROUP_BINDER_RE = re.compile(r"[({\[⦃]\s*" + _NAMES + r"\s*:(?!=)")
+_QUANT_BINDER_RE = re.compile(r"[∀∃]\s*" + _NAMES + r"\s*:(?!=)")
+_HEADER_END_RE = re.compile(r":=|\bwhere\b|\|")
+
+
+def _header(code: str) -> str:
+    """The binder list of a declaration: the code up to the bracket-depth-0
+    colon that introduces its type, or to `:=` / `where` / `|` if that comes
+    first. A `(x : T)` past that point is a type ascription, not a binder."""
+    depth = 0
+    for i, ch in enumerate(code):
+        if ch in _OPENERS:
+            depth += 1
+        elif ch in _CLOSERS:
+            depth -= 1
+        elif depth == 0 and ch == ":" and not code.startswith(":=", i):
+            return code[:i]
+    m = _HEADER_END_RE.search(code)
+    return code[: m.start()] if m else code
+
+
+def local_binders(src: str) -> frozenset[str]:
+    """Names bound locally in `src`. A bare use of one must not resolve to an
+    unrelated project decl that shares its final component."""
+    code = "".join(text for text, is_code in split_code_comments(src) if is_code)
+    names: set[str] = set()
+    for m in _GROUP_BINDER_RE.finditer(_header(code)):
+        names.update(m.group(1).split())
+    for m in _QUANT_BINDER_RE.finditer(code):
+        names.update(m.group(1).split())
+    return frozenset(names)
 
 
 def build_indexes(
@@ -463,11 +538,16 @@ def linkify_chunk(chunk: str, ctx: LinkCtx) -> str:
         target = proj_target.get(full, full)
         if target == define_name:
             return html.escape(text)  # a field of the decl being rendered: linking would point here
+        if target != full:  # a structure field: the link lands on the parent structure
+            return (
+                f'<a class="proj field" href="#{anchor_id(target)}" title="field of {html.escape(target)}">'
+                f"{html.escape(text)}</a>"
+            )
         return f'<a class="proj" href="#{anchor_id(target)}">{html.escape(text)}</a>'
 
     def mlib_link(full: str, text: str) -> str:
         url = mlib_full[full].url
-        return f'<a class="mlib" href="{html.escape(url)}" target="_blank">{html.escape(text)}</a>'
+        return f'<a class="mlib" href="{html.escape(url)}" target="_blank" rel="noopener">{html.escape(text)}</a>'
 
     def resolve_final(seg: str, dotted: bool = False) -> tuple[str, str] | None:
         """Resolve a final component to (kind, full_name). Prefer this decl's own
@@ -492,11 +572,14 @@ def linkify_chunk(chunk: str, ctx: LinkCtx) -> str:
     if chunk == define_name or chunk == define_final:
         return f'<strong class="self">{html.escape(chunk)}</strong>'
 
-    # 1. exact full-name match
+    # 1. exact full-name match; `TemporalGraph.{0}` tokenizes as `TemporalGraph.`
+    #    followed by the universe braces, so a trailing dot is linked too.
     if chunk in proj_full:
         return proj_link(chunk, chunk)
     if chunk in mlib_full:
         return mlib_link(chunk, chunk)
+    if chunk.endswith(".") and chunk[:-1] in proj_full:
+        return proj_link(chunk[:-1], chunk[:-1]) + "."
 
     # 2. dotted chunk (dot-notation chain): the head segment is a term/namespace
     #    qualifier — never linked here. Only the projection/method segments after
@@ -513,7 +596,9 @@ def linkify_chunk(chunk: str, ctx: LinkCtx) -> str:
                 rendered.append(html.escape(seg))
         return ".".join(rendered)
 
-    # 3. bare token matched by final component
+    # 3. bare token matched by final component — unless it is a local binder
+    if chunk in ctx.binders:
+        return html.escape(chunk)
     r = resolve_final(chunk)
     if r:
         kind, full = r
@@ -624,9 +709,9 @@ CSS = """
   --fs-xl: 1.5rem; --fs-2xl: 1.6rem;
   --lh: 1.4; --fw-semibold: 600;
   --radius-sm: 4px; --radius: 6px; --radius-lg: 8px;
-  --gray-100: #eee; --gray-400: #999; --gray-500: #777; --gray-600: #555;
+  --gray-100: #eee; --gray-400: #6b6b6b; --gray-500: #777; --gray-600: #555;
   --gray-700: #444; --gray-900: #1a1a1a;
-  --link-proj: #0b6bcb; --link-mlib: #8a5a00; --self: #b21f66; --cmt: #9aa0a6;
+  --link-proj: #0b6bcb; --link-mlib: #8a5a00; --self: #b21f66; --cmt: #5f6368;
   --pre-bg: #f7f7f9; --pre-border: #e3e3e8; --code-ax-bg: rgba(0,0,0,.05);
   --white: #fff;
   --ok: #1a7a1a; --ok-bg: #e3f5e3; --ok-panel-bg: #eef8ee; --ok-panel-border: #b6e0b6;
@@ -639,32 +724,64 @@ CSS = """
   --bad-pill-bg: #f6cccc; --bad-pill-fg: #8a1515;
   --info-panel-bg: #eef4fb; --info-panel-border: #c3dbf3;
 }
-body { font-family: var(--font-sans); max-width: 1000px;
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+body { font-family: var(--font-sans); max-width: 1240px; overflow-wrap: anywhere;
        margin: 2rem auto; padding: 0 1rem; color: var(--gray-900); line-height: var(--lh); }
 h1 { font-size: var(--fs-2xl); } h2 { margin-top: 2.5rem; border-bottom: 2px solid var(--gray-100); }
-.entry { margin: 1.5rem 0; padding: .5rem 0; border-top: 1px solid var(--gray-100); }
+main h2:first-child { margin-top: 0; }
+.layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 2rem; align-items: start; }
+.side { position: sticky; top: 0; max-height: 100vh; overflow-y: auto; padding: .5rem .5rem .5rem 0;
+        font-size: var(--fs-sm); border-right: 1px solid var(--gray-100); }
+.side h2 { font-size: var(--fs-base); border: 0; margin-top: 0; }
+.side details > summary { display: none; }
+.side ul { list-style: none; padding-left: 0; margin: .2rem 0 .6rem; }
+.side li { margin: .12rem 0; }
+.side li a { display: block; padding: .1rem .4rem; border-radius: var(--radius-sm); color: var(--link-proj);
+             text-decoration: none; box-shadow: inset 3px 0 0 transparent; }
+.side li a:hover { text-decoration: underline; }
+.side li a.current { background: var(--info-panel-bg); color: var(--gray-900);
+                     box-shadow: inset 3px 0 0 var(--link-proj); }
+.side .kind { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--gray-500); }
+@media (max-width: 860px) {
+  .layout { display: block; }
+  .side { position: static; max-height: none; border: 0; }
+  .side details > summary { display: list-item; cursor: pointer; font-weight: var(--fw-semibold); padding: .4rem 0; }
+}
+.entry { margin: 2.2rem 0; padding: .5rem 0; }
 .entry h3 { margin: .2rem 0; font-size: var(--fs-lg); }
+.subhead { font-family: var(--font-mono); font-size: var(--fs-sm); margin: .1rem 0 .4rem; color: var(--gray-700); }
+.summary { margin: .3rem 0 .5rem; font-size: var(--fs-base); }
+.prov { font-size: var(--fs-sm); color: var(--gray-600); }
 .desc { color: var(--gray-600); font-size: var(--fs-base); margin: .2rem 0 .1rem; }
 .codeblock { margin: .6rem 0 1rem; }
 .codeblock pre { margin: 0; }
-.code-meta { display: block; text-align: right; padding: .25rem .1rem 0 0;
-             font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--gray-400); }
+.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .2rem 1.5rem;
+        font-size: var(--fs-sm); color: var(--gray-600); margin: .3rem 0 0; }
+.code-meta { font-family: var(--font-mono); font-size: var(--fs-sm); order: 2; margin-left: auto; }
+a.src { color: var(--link-proj); }
 pre { background: var(--pre-bg); border: 1px solid var(--pre-border); border-radius: var(--radius);
       padding: .7rem .9rem; overflow-x: auto; font-size: var(--fs-base);
       font-family: var(--font-code); }
-a.proj { color: var(--link-proj); text-decoration: none; }
-a.proj:hover { text-decoration: underline; }
-a.mlib { color: var(--link-mlib); text-decoration: none; }
-a.mlib:hover { text-decoration: underline; }
+pre code { font-family: inherit; }
+a.proj { color: var(--link-proj); }
+a.mlib { color: var(--link-mlib); }
+a.proj, a.mlib, a.src { text-decoration: underline; text-decoration-color: rgba(0,0,0,.25);
+                        text-underline-offset: .18em; }
+a.proj:hover, a.mlib:hover, a.src:hover { text-decoration-color: currentColor; }
+pre a.proj, pre a.mlib { text-decoration: none; }
+pre a.proj:hover, pre a.mlib:hover { text-decoration: underline; }
+a.field { text-decoration-style: dotted; }
+.sample { text-decoration: underline; }
+.proj.sample { color: var(--link-proj); }
+.mlib.sample { color: var(--link-mlib); }
+a:focus-visible, pre:focus-visible { outline: 3px solid #ffbf47; outline-offset: 2px; }
 strong.self { color: var(--self); }
 strong.label { font-weight: var(--fw-semibold); }
 .cmt { color: var(--cmt); font-style: italic; }
 .proof, .proof a { color: var(--gray-400); }
-.head { font-weight: var(--fw-semibold); }
-.title { font-weight: var(--fw-semibold); }
+.head { color: var(--gray-500); font-size: var(--fs-sm); }
 .paperref { font-size: var(--fs-sm); color: var(--gray-500); }
-.toc { columns: 2; font-size: var(--fs-base); } .toc a { text-decoration: none; color: var(--link-proj); }
-.tocgroup { break-after: avoid; font-weight: var(--fw-semibold); color: var(--gray-700); margin: .4rem 0 .15rem; }
+.tocgroup { font-weight: var(--fw-semibold); color: var(--gray-700); margin: .4rem 0 .15rem; }
 .paper { margin-top: 1.6rem; }
 .paper > h3 { font-size: var(--fs-lg); margin: .3rem 0; }
 .badge { display: inline-block; font-size: var(--fs-xs); font-weight: var(--fw-semibold);
@@ -675,8 +792,14 @@ strong.label { font-weight: var(--fw-semibold); }
 .axioms { font-size: var(--fs-xs); color: var(--warn); font-family: var(--font-mono); margin-left: .35rem; }
 .mlist { column-count: 2; font-size: var(--fs-base); } .mlist a { color: var(--link-mlib); }
 .trunc { color: var(--gray-400); font-style: italic; }
-.usedby { font-size: var(--fs-sm); color: var(--gray-600); margin-top: .1rem; }
+.usedby { margin: 0; flex: 1 1 60%; }
 .usedby-label { font-weight: var(--fw-semibold); margin-right: .3rem; }
+.usedby details { display: inline; }
+.usedby summary { display: inline; cursor: pointer; list-style: none; }
+.usedby summary::-webkit-details-marker { display: none; }
+.usedby summary::after { content: ' ▸'; font-size: .8em; }
+.usedby details[open] summary::after { content: ' ▾'; }
+.usedby details[open] summary { display: block; margin-bottom: .15rem; }
 .subtitle { font-size: var(--fs-lg); color: var(--gray-600); margin: -.4rem 0 1.2rem; }
 .vpanel { display: flex; gap: .85rem; align-items: flex-start; border-radius: var(--radius-lg);
           border: 1px solid; padding: .8rem 1rem; margin: 1.4rem 0; }
@@ -706,6 +829,12 @@ code.ax { background: var(--code-ax-bg); border-radius: var(--radius-sm); paddin
 """
 
 
+HUMAN_REVIEW_NOTE = (
+    "<div class='vpanel-sub'><strong>Correspondence with the intended mathematics requires human review.</strong>"
+    " That review is what this document is for.</div>"
+)
+
+
 def render(
     data: dict[str, Any],
     lean_root: Path,
@@ -713,7 +842,10 @@ def render(
     package: str | None,
     config: ReviewConeConfig,
     show_support_toc: bool,
+    src_prefix: str = "",
 ) -> str:
+    """`src_prefix` is the path from the output document's directory to
+    `lean_root`, so each entry's source location can link to its file."""
     project = [ConeDecl.from_json(d) for d in data["project"]]
     mathlib = sorted((MathlibDecl(d["name"], d.get("url", "")) for d in data["mathlib"]), key=lambda d: d.name.lower())
     field_of = data.get("fieldOf", {})
@@ -725,9 +857,11 @@ def render(
     # `[section.labels]`).
     title_map: dict[str, str] = {}
     label_map: dict[str, str] = {}
+    summary_map: dict[str, str] = {}
     for sec in config["sections"]:
         title_map.update(sec["titles"])
         label_map.update(sec["labels"])
+        summary_map.update(sec["summaries"])
 
     # Read each decl's source once; the cache reads each *module* once.
     module_lines: dict[str, list[str]] = {}
@@ -747,13 +881,20 @@ def render(
             used_by.setdefault(target, set()).add(dname)
 
     def used_by_html(d: ConeDecl) -> str:
+        """A long list of users collapses to a count behind a disclosure."""
         users = used_by.get(d.name)
         if not users:
             return ""
         items = ", ".join(
             f"<a class='proj' href='#{anchor_id(n)}'>{html.escape(n)}</a>" for n in sorted(users, key=str.lower)
         )
-        return f"<div class='usedby'><span class='usedby-label'>Used by:</span> {items}</div>"
+        label = "<span class='usedby-label'>Used by</span>"
+        if len(users) > 3:
+            return (
+                f"<div class='usedby'><details><summary>{label} {len(users)} declarations</summary>"
+                f"{items}</details></div>"
+            )
+        return f"<div class='usedby'>{label} {items}</div>"
 
     # --- Reading order: topological build-up (dependencies first) -------------
     def dep_edges(d: ConeDecl) -> list[str]:
@@ -823,16 +964,21 @@ def render(
             define_final=name.split(".")[-1],
             local_final={f: next(iter(s)) for f, s in local_by_final.items() if len(s) == 1},
             local_qual_final={f: next(iter(s)) for f, s in local_by_qfinal.items() if len(s) == 1},
+            binders=local_binders(d.snippet),
         )
         snippet = d.snippet
         body = linkify(snippet, ctx) if snippet else "<span class='trunc'>(source not found)</span>"
         tag = " <span class='trunc'>… (truncated)</span>" if d.truncated else ""
         file_disp = module_path(d.module).as_posix()
+        href = html.escape(f"{src_prefix}{urllib.parse.quote(file_disp)}#L{d.start_line}")
         meta = (
-            f"<span class='code-meta'><span class='code-file'>{html.escape(file_disp)}</span>"
-            f" · {d.start_line}–{d.end_line}</span>"
+            f"<span class='code-meta'><a class='src' href='{href}' title='open source file'>"
+            f"{html.escape(file_disp)}</a> · {d.start_line}–{d.end_line}</span>"
         )
-        return f"<div class='codeblock'><pre>{body}{tag}</pre>{meta}</div>"
+        return (
+            f"<div class='codeblock'><pre tabindex='0'><code>{body}{tag}</code></pre></div>"
+            f"<div class='foot'>{meta}{used_by_html(d)}</div>"
+        )
 
     st_counts = Counter(d.status for d in project)
     n_total = len(project)
@@ -849,22 +995,23 @@ def render(
     foot_bits.append("checked by <code>#print axioms</code> on the full build")
     footer = " · ".join(html.escape(b) if "<" not in b else b for b in foot_bits)
 
+    panel_tail = f"<div class='vpanel-foot'>{footer}</div>{HUMAN_REVIEW_NOTE}</div></section>"
     all_verified = n_verified == n_total and n_total > 0
     if all_verified:
         panel = (
             "<section class='vpanel ok'><div class='vpanel-icon'>✓</div>"
             "<div class='vpanel-body'>"
-            f"<div class='vpanel-head'>All {n_total} declarations fully verified</div>"
-            "<div class='vpanel-sub'>Sorry-free, and depending only on the standard "
-            f"axioms {axiom_chips}</div>"
-            f"<div class='vpanel-foot'>{footer}</div></div></section>"
+            f"<div class='vpanel-head'>All {n_total} declarations kernel-checked</div>"
+            "<div class='vpanel-sub'>Standard axioms only; no <code>sorry</code> dependencies: "
+            f"{axiom_chips}</div>"
+            f"{panel_tail}"
         )
     else:
         icon = "✗" if n_sorry else ("⚠" if n_tainted else "✓")
         cls = "sorry" if n_sorry else ("warn" if n_tainted else "ok")
         pills = []
         if n_verified:
-            pills.append(f"<span class='pill verified'>{n_verified} verified</span>")
+            pills.append(f"<span class='pill verified'>{n_verified} kernel-checked</span>")
         if n_tainted:
             pills.append(f"<span class='pill tainted'>{n_tainted} tainted</span>")
         if n_sorry:
@@ -874,10 +1021,10 @@ def render(
             "<div class='vpanel-body'>"
             f"<div class='vpanel-head'>Verification status &mdash; {n_total} declarations</div>"
             f"<div class='vpanel-pills'>{''.join(pills)}</div>"
-            "<div class='vpanel-sub'>Verified = sorry-free, standard axioms "
+            "<div class='vpanel-sub'>Kernel-checked = sorry-free, standard axioms "
             f"({axiom_chips}) only. Tainted = sorry-free but uses extra axioms "
             "(listed by the badge). Sorry = depends on <code>sorryAx</code>.</div>"
-            f"<div class='vpanel-foot'>{footer}</div></div></section>"
+            f"{panel_tail}"
         )
 
     def toc_label(d: ConeDecl) -> str:
@@ -906,7 +1053,8 @@ def render(
     else:
         order_prose = ""
     parts = [
-        "<!doctype html><html><head><meta charset='utf-8'>",
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>",
         f"<title>{html.escape(title)}</title>",
         f"<style>{CSS}</style></head><body>",
         f"<h1>Lean 4 formalization of <em>{html.escape(ptitle)}</em></h1>",
@@ -916,7 +1064,7 @@ def render(
         "intended meaning. Closing that gap is the human reviewer's job. The "
         "declarations collected here are the <strong>review cone</strong> (following "
         "<a class='proj' href='https://github.com/NyxFoundation/lean-atlas' "
-        "target='_blank'>lean-atlas</a>): the transitive set of statements and "
+        "target='_blank' rel='noopener'>lean-atlas</a>): the transitive set of statements and "
         "definitions whose meaning can affect what the results say &mdash; the "
         "minimal set one must read to trust the formalization. The proofs themselves "
         "can be taken on trust, since the checker guarantees them.</p>",
@@ -924,8 +1072,8 @@ def render(
         + (f" &mdash; {order_prose}" if order_prose else "")
         + support_prose
         + ". The defined name is <strong class='self'>bold pink</strong> at its definition. "
-        "<a class='proj' href='#'>Blue links</a> jump within this document; "
-        "<a class='mlib' href='#'>brown links</a> open the mathlib4 docs.</p>",
+        "<span class='proj sample'>Blue links</span> jump within this document; "
+        "<span class='mlib sample'>brown links</span> open the mathlib4 docs.</p>",
     ]
     parts.append(panel)
     info = config["info"]
@@ -936,39 +1084,95 @@ def render(
             "<div class='vpanel-body'>"
             f"<div class='vpanel-head'>{html.escape(info['heading'])}</div>"
             f"<div class='vpanel-sub'>{html.escape(info['text'])} "
-            f"<a class='proj' href='{url}' target='_blank'>{url}</a></div>"
+            f"<a class='proj' href='{url}' target='_blank' rel='noopener'>{url}</a></div>"
             "</div></section>"
         )
+    rev = git_revision(lean_root)
+    if rev:
+        parts.append(f"<p class='prov'>Generated from repository revision <code>{html.escape(rev)}</code>.</p>")
+
+    # Sidebar contents: every section that opts in, then the support catch-all.
+    # A sticky column on wide screens; a disclosure (closed by default) on narrow.
+    def nav_item(d: ConeDecl, label: str) -> str:
+        return f"<li><a href='#{anchor_id(d.name)}'><span class='kind'>{html.escape(d.kind)}</span> {label}</a></li>"
 
     toc_sections = [(t, e) for t, in_toc, e in section_entries if e and in_toc]
-    if toc_sections or (support and show_support_toc):
-        parts.append("<h2>Contents</h2><div class='toc'>")
+    nav = []
     for sec_title, entries in toc_sections:
-        parts.append(f"<div class='tocgroup'>{html.escape(sec_title)} ({len(entries)})</div>")
-        for d in entries:
-            parts.append(f"<a href='#{anchor_id(d.name)}'>{toc_label(d)}</a><br>")
+        nav.append(f"<div class='tocgroup'>{html.escape(sec_title)} ({len(entries)})</div><ul>")
+        nav.extend(nav_item(d, toc_label(d)) for d in entries)
+        nav.append("</ul>")
     if support and show_support_toc:
-        parts.append(f"<div class='tocgroup'>{html.escape(support_title)} ({len(support)})</div>")
-        for d in support:
-            parts.append(f"<a href='#{anchor_id(d.name)}'>{html.escape(d.name)}</a><br>")
-    if toc_sections or (support and show_support_toc):
-        parts.append("</div>")
-
+        nav.append(
+            f"<div class='tocgroup'>{html.escape(support_title)} ({len(support)}), in dependency order</div><ul>"
+        )
+        nav.extend(nav_item(d, html.escape(d.name)) for d in support)
+        nav.append("</ul>")
+    n_nav = sum(len(e) for _, e in toc_sections) + (len(support) if show_support_toc else 0)
+    if nav:
+        parts.append(
+            "<div class='layout'><nav class='side' aria-label='Contents'><details open>"
+            f"<summary>Contents ({n_nav} declarations)</summary><h2 id='contents'>Contents</h2>"
+            + "".join(nav)
+            + "</details></nav>"
+        )
+    parts.append("<main>")
     for sec_title, _, entries in section_entries:
         if not entries:
             continue
         parts.append(f"<h2>{html.escape(sec_title)}</h2>")
         for d in entries:
             parts.append(
-                render_decl(d, _body(d) + used_by_html(d), title_map.get(d.name, ""), label_map.get(d.name, ""))
+                render_decl(
+                    d, _body(d), title_map.get(d.name, ""), label_map.get(d.name, ""), summary_map.get(d.name, "")
+                )
             )
     if support:
         parts.append(f"<h2>{html.escape(support_title)}</h2>")
         for d in support:
-            parts.append(render_decl(d, _body(d) + used_by_html(d)))
-
+            parts.append(render_decl(d, _body(d)))
+    parts.append("</main>")
+    if nav:
+        parts.append("</div>" + SIDEBAR_JS)
     parts.append("</body></html>")
     return "".join(parts)
+
+
+# Marks the sidebar entry of the declaration currently in view, keeps that entry
+# visible by scrolling the sidebar alone, and folds the contents on narrow
+# screens (reopening it whenever the wide layout returns).
+SIDEBAR_JS = """<script>
+(function(){
+  const links=[...document.querySelectorAll('.side a[href^="#"]')];
+  const byId=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...byId.keys()].map(id=>document.getElementById(id)).filter(Boolean);
+  const side=document.querySelector('.side');
+  let current=null;
+  function setCurrent(id){
+    if(id===current) return; current=id;
+    links.forEach(a=>{a.classList.remove('current'); a.removeAttribute('aria-current');});
+    const a=byId.get(id); if(!a) return;
+    a.classList.add('current'); a.setAttribute('aria-current','location');
+    if(side.scrollHeight>side.clientHeight){
+      const r=a.getBoundingClientRect(), sr=side.getBoundingClientRect();
+      if(r.top<sr.top) side.scrollTop+=r.top-sr.top-8;
+      else if(r.bottom>sr.bottom) side.scrollTop+=r.bottom-sr.bottom+8;
+    }
+  }
+  function update(){
+    if(!heads.length) return;
+    const y=window.scrollY+Math.min(120,window.innerHeight/4);
+    let best=heads[0];
+    for(const h of heads){ if(h.offsetTop<=y) best=h; else break; }
+    setCurrent(best.id);
+  }
+  window.addEventListener('scroll',update,{passive:true}); window.addEventListener('resize',update); update();
+  const det=side.querySelector('details'), mq=window.matchMedia('(max-width: 860px)');
+  function layout(){ if(mq.matches){ if(!det.dataset.touched) det.open=false; } else det.open=true; }
+  det.addEventListener('toggle',()=>{ if(mq.matches) det.dataset.touched='1'; });
+  mq.addEventListener('change',layout); layout();
+})();
+</script>"""
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1001,7 +1205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument(
         "--toc-support",
         action="store_true",
-        help="List the supporting declarations in the ToC (off by default; forces them on, ignoring support.toc).",
+        help="List the supporting declarations in the contents even if the config sets support.toc = false.",
     )
     args = ap.parse_args(argv)
 
@@ -1075,12 +1279,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     package = read_package_name(project_root) if project_root is not None else None
     show_support_toc = config["support"]["toc"] or args.toc_support
-    html_str = render(data, lean_root, args.title or config["title"], package, config, show_support_toc)
 
     # Output: --out beats the config's `out` (resolved against the project
     # root) beats the default name.
     doc_root = project_root or lean_root
     out_path = args.out or (doc_root / config["out"] if config["out"] else doc_root / f"{config_path.stem}.html")
+    src_prefix = os.path.relpath(lean_root.resolve(), out_path.resolve().parent).replace(os.sep, "/")
+    src_prefix = "" if src_prefix == "." else src_prefix + "/"
+    html_str = render(data, lean_root, args.title or config["title"], package, config, show_support_toc, src_prefix)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html_str, encoding="utf-8")
 

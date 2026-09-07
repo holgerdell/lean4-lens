@@ -26,6 +26,7 @@ class SectionConfig(TypedDict):
     decls: list[str]
     titles: dict[str, str]
     labels: dict[str, str]
+    summaries: dict[str, str]
     toc: bool
 
 
@@ -105,7 +106,7 @@ def _read_info(raw: dict[str, object]) -> InfoConfig | None:
 def load_config(path: Path) -> ReviewConeConfig:
     """Parse and validate `review-cone.toml`. Returns
         {"sections": [{"title": str, "decls": [name], "titles": {name: str},
-          "labels": {name: str}, "toc": bool}],
+          "labels": {name: str}, "summaries": {name: str}, "toc": bool}],
          "support": {"title": str, "toc": bool},
          "info": {"heading": str, "text": str, "url": str} | None,
          "roots": [name],          # union of all section decls, order-preserving
@@ -116,11 +117,12 @@ def load_config(path: Path) -> ReviewConeConfig:
         strings, and an optional `toc` flag (default true) that lists it in the
         table of contents;
       * no decl appears in two sections;
-      * every `[section.titles]` and `[section.labels]` key is one of that
-        section's decls, with a string value (a value that parsed to a dict
+      * every `[section.titles]`, `[section.labels]` and `[section.summaries]`
+        key is one of that section's decls, with a string value (a value that parsed to a dict
         means an *unquoted* dotted key — Lean names contain dots — which TOML
         silently nests). A label ("Theorem 1") replaces the kind and the Lean
-        name in the entry's heading;
+        name in the entry's heading; a summary is a prose paragraph shown
+        above the entry's source;
       * the optional `[info]` table, when present, has a non-empty string
         `url` (plus optional `heading`/`text`) — it renders the panel that
         points a reader at the full sources."""
@@ -155,12 +157,14 @@ def load_config(path: Path) -> ReviewConeConfig:
             roots.append(d)
         titles = _read_name_table(sec, "titles", "title", title, decls)
         labels = _read_name_table(sec, "labels", "label", title, decls)
+        summaries = _read_name_table(sec, "summaries", "summary", title, decls)
         sections.append(
             {
                 "title": title,
                 "decls": decls,
                 "titles": titles,
                 "labels": labels,
+                "summaries": summaries,
                 "toc": bool(sec.get("toc", True)),
             }
         )
@@ -170,7 +174,7 @@ def load_config(path: Path) -> ReviewConeConfig:
         raise ConfigError("`[support]` must be a table")
     support: SupportConfig = {
         "title": sup.get("title", "Supporting declarations"),
-        "toc": bool(sup.get("toc", False)),
+        "toc": bool(sup.get("toc", True)),
     }
     if not isinstance(support["title"], str) or not support["title"].strip():
         raise ConfigError("`support.title` must be a non-empty string")
