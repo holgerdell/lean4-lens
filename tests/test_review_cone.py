@@ -99,7 +99,7 @@ def test_heading_names_the_document_a_formalization(tmp_path: Path) -> None:
 def test_intro_spells_out_how_much_the_document_covers(tmp_path: Path) -> None:
     html = _render_fixture(tmp_path, 'title = "Fixture"\n', n_decls=3)
     assert "The three results are grouped into sections" in html
-    assert "the zero remaining <em>supporting declarations</em>" in html
+    assert "remaining <em>supporting declarations</em>" not in html
 
 
 @pytest.mark.parametrize(

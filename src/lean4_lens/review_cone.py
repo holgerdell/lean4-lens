@@ -888,6 +888,13 @@ def render(
     title = "Lean 4 formalization of " + ptitle
     named_titles = [t for t, _, entries in section_entries if entries]  # headings that actually render, in order
     n_headline = sum(len(entries) for _, _, entries in section_entries)
+    # With nothing left over, the sentence just ends after the sections.
+    support_prose = (
+        f"; the {spell(len(support))} remaining <em>{html.escape(support_title.lower())}</em> "
+        "follow in <em>topological order</em>, each after everything it depends on"
+        if support
+        else ""
+    )
 
     def _em(t: str) -> str:
         return f"<em>{html.escape(t)}</em>"
@@ -915,9 +922,8 @@ def render(
         "can be taken on trust, since the checker guarantees them.</p>",
         f"<p>The {spell(n_headline)} results are grouped into sections"
         + (f" &mdash; {order_prose}" if order_prose else "")
-        + f"; the {spell(len(support))} remaining <em>{html.escape(support_title.lower())}</em> "
-        "follow in <em>topological order</em>, each after everything it depends on. The "
-        "defined name is <strong class='self'>bold pink</strong> at its definition. "
+        + support_prose
+        + ". The defined name is <strong class='self'>bold pink</strong> at its definition. "
         "<a class='proj' href='#'>Blue links</a> jump within this document; "
         "<a class='mlib' href='#'>brown links</a> open the mathlib4 docs.</p>",
     ]
