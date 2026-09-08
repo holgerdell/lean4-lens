@@ -850,7 +850,7 @@ h1 { font: 400 30px/1.25 var(--font-heading); margin: 8px 0 12px; }
 .summary { margin: 0 0 16px; }
 .summary:last-child { margin-bottom: 0; }
 .summary code { font: .85em/1.6 var(--font-code); }
-pre.summary { overflow-x: auto; font-size: .8em; line-height: 1.5; }
+pre.summary { overflow-x: auto; white-space: pre; font: 13px/1.6 var(--font-code); }
 .lean { padding: 0 24px 28px; }
 pre { margin: 0; font: 13px/1.8 var(--font-code); white-space: pre-wrap; overflow-wrap: anywhere; }
 pre code { font: inherit; }
