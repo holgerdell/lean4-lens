@@ -48,6 +48,7 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
 import sys
 import tempfile
 import urllib.parse
@@ -355,8 +356,22 @@ def status_badge(d: ConeDecl) -> str:
     return ""
 
 
+_FENCE_RE = re.compile(r"^[ \t]*```[^\n]*\n(.*?)\n[ \t]*```[ \t]*$", re.S | re.M)
+
+
 def prose_html(text: str) -> str:
-    """Escape authored prose, supporting paragraphs and inline code only."""
+    """Escape authored prose: paragraphs, inline code, and fenced code blocks."""
+    out = []
+    pos = 0
+    for m in _FENCE_RE.finditer(text):
+        out.append(_paragraphs_html(text[pos : m.start()]))
+        out.append(f"<pre class='summary'><code>{html.escape(textwrap.dedent(m.group(1)))}</code></pre>")
+        pos = m.end()
+    out.append(_paragraphs_html(text[pos:]))
+    return "".join(out)
+
+
+def _paragraphs_html(text: str) -> str:
     paragraphs = []
     for paragraph in re.split(r"\n\s*\n", text.strip()):
         if not paragraph:
@@ -835,6 +850,7 @@ h1 { font: 400 30px/1.25 var(--font-heading); margin: 8px 0 12px; }
 .summary { margin: 0 0 16px; }
 .summary:last-child { margin-bottom: 0; }
 .summary code { font: .85em/1.6 var(--font-code); }
+pre.summary { overflow-x: auto; font-size: .8em; line-height: 1.5; }
 .lean { padding: 0 24px 28px; }
 pre { margin: 0; font: 13px/1.8 var(--font-code); white-space: pre-wrap; overflow-wrap: anywhere; }
 pre code { font: inherit; }

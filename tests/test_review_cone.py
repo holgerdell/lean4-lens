@@ -274,6 +274,14 @@ def test_docstring_moves_to_prose_without_touching_field_comments() -> None:
     assert R.split_docstring(body) == ('', body)
 
 
+def test_prose_renders_fenced_code_block_verbatim() -> None:
+    doc = "Apply the first rule.\n\n```\nif a < b then x\nelse   y\n```\n"
+    out = R.prose_html(doc)
+    assert "<p class='summary'>Apply the first rule.</p>" in out
+    assert "<pre class='summary'><code>if a &lt; b then x\nelse   y</code></pre>" in out
+    assert "``" not in out
+
+
 def test_prose_escapes_html_and_preserves_inline_code() -> None:
     prose = R.prose_html('For `<x>` & y.\n\n<script>alert(1)</script>')
     assert '<code>&lt;x&gt;</code> &amp; y.' in prose
