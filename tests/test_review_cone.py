@@ -290,6 +290,41 @@ def test_prose_escapes_html_and_preserves_inline_code() -> None:
     assert R.prose_html("`unclosed") == "<p class='summary'>`unclosed</p>"
 
 
+def test_prose_renders_math_lists_and_emphasis() -> None:
+    doc = (
+        "Let $\\pi(S) = \\sum_{v \\in S} \\pi(v)$ be the mass, *not* `S`.\n\n$$ a < b $$\n\n"
+        "- first\n  continued\n- **second**\n\n1. one\n2) two"
+    )
+    out = R.prose_html(doc)
+    assert "<span class='math'>\\pi(S) = \\sum_{v \\in S} \\pi(v)</span>" in out
+    assert "<span class='math display'>a &lt; b</span>" in out
+    assert "<em>not</em> <code>S</code>" in out
+    assert "<ul class='summary'><li>first\ncontinued</li><li><strong>second</strong></li></ul>" in out
+    assert "<ol class='summary'><li>one</li><li>two</li></ol>" in out
+    # A lone or unclosed delimiter stays literal, as does markup inside code and math.
+    assert R.prose_html("costs $5 and `$x$` and $a*b*c$") == (
+        "<p class='summary'>costs $5 and <code>$x$</code> and <span class='math'>a*b*c</span></p>"
+    )
+    assert R.prose_html("2 * 3 * 4") == "<p class='summary'>2 * 3 * 4</p>"
+
+
+def test_katex_included_only_when_prose_has_math(tmp_path: Path) -> None:
+    (tmp_path / 'Fixture.lean').write_text('/-- Plain. -/\ndef a : Nat := 1\n/-- Math $x$. -/\ndef b : Nat := 2\n')
+    config_path = tmp_path / 'review-cone.toml'
+    config_path.write_text('[[section]]\ntitle="Results"\ndecls=["Fixture.a", "Fixture.b"]\n')
+    config = C.load_config(config_path)
+
+    def render(name: str, line: int) -> str:
+        decl = {'name': f'Fixture.{name}', 'module': 'Fixture', 'kind': 'def',
+                'startLine': line, 'endLine': line + 1, 'status': 'verified', 'axioms': []}
+        return R.render({'project': [decl], 'mathlib': []}, tmp_path, None, None, config, True, '../')
+
+    assert R.KATEX_HEAD not in render('a', 1)
+    math = render('b', 3)
+    assert R.KATEX_HEAD in math and R.KATEX_SCRIPT in math
+    assert "<span class='math'>x</span>" in math
+
+
 def test_comparison_keeps_long_definitions_and_warnings_visible(tmp_path: Path) -> None:
     source = '/-- Source description. -/\ndef longValue : Nat :=\n' + '  1 +\n' * 65 + '  0\n'
     (tmp_path / 'Fixture.lean').write_text(source)

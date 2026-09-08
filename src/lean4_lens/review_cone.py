@@ -48,9 +48,9 @@ import os
 import re
 import shutil
 import subprocess
-import textwrap
 import sys
 import tempfile
+import textwrap
 import urllib.parse
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
@@ -357,32 +357,80 @@ def status_badge(d: ConeDecl) -> str:
 
 
 _FENCE_RE = re.compile(r"^[ \t]*```[^\n]*\n(.*?)\n[ \t]*```[ \t]*$", re.S | re.M)
+# Inline code, display math, inline math. Code closes on the same line; math never crosses a
+# backtick, inline math never crosses a line, and (as in pandoc) an opening `$` is not followed
+# by whitespace or a digit — so a stray "$5" or an unclosed delimiter stays literal text.
+_INLINE_RE = re.compile(r"(`[^`\n]+`|\$\$(?:(?!\$\$)[^`])+?\$\$|\$(?![\s\d$])[^$`\n]+?(?<!\s)\$)", re.S)
+_LIST_ITEM_RE = re.compile(r"^[ \t]*(?:[-*•]|\d+[.)])[ \t]+")
+_STRONG_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
+_EM_RE = re.compile(r"(?<![\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])")
+
+KATEX_VERSION = "0.16.22"
+KATEX_CDN = f"https://cdnjs.cloudflare.com/ajax/libs/KaTeX/{KATEX_VERSION}"
+KATEX_HEAD = f"<link rel='stylesheet' href='{KATEX_CDN}/katex.min.css'>"
+KATEX_SCRIPT = (
+    f"<script defer src='{KATEX_CDN}/katex.min.js'></script>"
+    "<script>document.addEventListener('DOMContentLoaded',function(){"
+    "document.querySelectorAll('.math').forEach(function(el){try{"
+    "katex.render(el.textContent,el,{throwOnError:false,displayMode:el.classList.contains('display')})"
+    "}catch(e){}})})</script>"
+)
 
 
 def prose_html(text: str) -> str:
-    """Escape authored prose: paragraphs, inline code, and fenced code blocks."""
+    """Render authored prose from a small, hand-rolled markdown subset.
+
+    Blank lines separate paragraphs; a paragraph whose lines start with `-`, `*`
+    or `1.` is a list; fenced blocks are code. Inline: backticks for code,
+    `*emphasis*`, `**strong**`, and `$…$` / `$$…$$` for TeX rendered by KaTeX.
+    Everything is HTML-escaped first, so raw markup is never interpreted.
+    """
     out = []
     pos = 0
     for m in _FENCE_RE.finditer(text):
-        out.append(_paragraphs_html(text[pos : m.start()]))
+        out.append(_blocks_html(text[pos : m.start()]))
         out.append(f"<pre class='summary'><code>{html.escape(textwrap.dedent(m.group(1)))}</code></pre>")
         pos = m.end()
-    out.append(_paragraphs_html(text[pos:]))
+    out.append(_blocks_html(text[pos:]))
     return "".join(out)
 
 
-def _paragraphs_html(text: str) -> str:
-    paragraphs = []
-    for paragraph in re.split(r"\n\s*\n", text.strip()):
-        if not paragraph:
+def _blocks_html(text: str) -> str:
+    blocks = []
+    for block in re.split(r"\n\s*\n", text.strip()):
+        if not block:
             continue
-        pieces = re.split(r"(`[^`]+`)", paragraph)
-        body = "".join(
-            f"<code>{html.escape(piece[1:-1])}</code>" if i % 2 else html.escape(piece)
-            for i, piece in enumerate(pieces)
-        )
-        paragraphs.append(f"<p class='summary'>{body}</p>")
-    return "".join(paragraphs)
+        if _LIST_ITEM_RE.match(block):
+            blocks.append(_list_html(block))
+        else:
+            blocks.append(f"<p class='summary'>{_inline_html(block)}</p>")
+    return "".join(blocks)
+
+
+def _list_html(block: str) -> str:
+    items: list[str] = []
+    for line in block.splitlines():
+        m = _LIST_ITEM_RE.match(line)
+        if m:
+            items.append(line[m.end() :])
+        else:  # a continuation line of the previous item
+            items[-1] += "\n" + line.strip()
+    tag = "ol" if block.lstrip()[0].isdigit() else "ul"
+    return f"<{tag} class='summary'>" + "".join(f"<li>{_inline_html(i)}</li>" for i in items) + f"</{tag}>"
+
+
+def _inline_html(text: str) -> str:
+    out = []
+    for i, piece in enumerate(_INLINE_RE.split(text)):
+        if i % 2 == 0:
+            out.append(_EM_RE.sub(r"<em>\1</em>", _STRONG_RE.sub(r"<strong>\1</strong>", html.escape(piece))))
+        elif piece.startswith("`"):
+            out.append(f"<code>{html.escape(piece[1:-1])}</code>")
+        elif piece.startswith("$$"):
+            out.append(f"<span class='math display'>{html.escape(piece[2:-2].strip())}</span>")
+        else:
+            out.append(f"<span class='math'>{html.escape(piece[1:-1].strip())}</span>")
+    return "".join(out)
 
 
 def split_docstring(snippet: str) -> tuple[str, str]:
@@ -851,6 +899,9 @@ h1 { font: 400 30px/1.25 var(--font-heading); margin: 8px 0 12px; }
 .summary:last-child { margin-bottom: 0; }
 .summary code { font: .85em/1.6 var(--font-code); }
 pre.summary { overflow-x: auto; white-space: pre; font: 13px/1.6 var(--font-code); }
+ul.summary, ol.summary { padding-left: 1.4em; }
+.summary .katex { font-size: 1.02em; }
+.katex-display { margin: .6em 0; overflow-x: auto; overflow-y: hidden; }
 .lean { padding: 0 24px 28px; }
 pre { margin: 0; font: 13px/1.8 var(--font-code); white-space: pre-wrap; overflow-wrap: anywhere; }
 pre code { font: inherit; }
@@ -1137,7 +1188,7 @@ def render(
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
         "<meta name='viewport' content='width=device-width, initial-scale=1'>",
         f"<title>{html.escape(title)}</title>",
-        f"<style>{CSS}</style></head><body>",
+        f"<style>{CSS}</style>", "</head><body>",
         f"<header class='page-heading'><h1>Lean 4 formalization of <em>{html.escape(ptitle)}</em></h1>",
         "<p class='intro'>Compare each mathematical statement with its Lean declaration. "
         "Follow linked terms to their definitions below.</p>",
@@ -1209,7 +1260,10 @@ def render(
             "Definitions and supporting statements in dependency order. Descriptions default to source comments.",
         ))
     parts.append("</main></body></html>")
-    return "".join(parts)
+    doc = "".join(parts)
+    if "class='math" in doc:  # KaTeX only when some prose carries math
+        doc = doc.replace("</head>", KATEX_HEAD + "</head>", 1).replace("</body>", KATEX_SCRIPT + "</body>", 1)
+    return doc
 
 
 

@@ -118,11 +118,18 @@ on that branch.
 
 Per section: `titles` gives a declaration its display heading; `labels` adds
 something like "Theorem 1" (or replaces the Lean name when no title is given).
-`summaries` supplies the prose beside the declaration, with blank lines for
-paragraphs and backticks for inline code. Without a summary, the renderer moves
-the leading source doc comment into the prose column. Field comments remain
-in the code. All prose is escaped; raw HTML is not interpreted. The declaration
-name is still present in Lean, and its filepath links to the original source.
+`summaries` supplies the prose beside the declaration. Without a summary, the
+renderer moves the leading source doc comment into the prose column. Field
+comments remain in the code. The declaration name is still present in Lean, and
+its filepath links to the original source.
+
+Prose, whether from a summary or a docstring, is rendered from a small
+hand-rolled markdown subset: blank lines separate paragraphs; lines starting
+with `-`, `*` or `1.` form a list; fenced blocks are code; inline, backticks
+give code, `*emphasis*` and `**strong**` work, and `$…$` / `$$…$$` hold TeX,
+which KaTeX renders from its CDN (the raw TeX stays readable offline; the
+KaTeX tags are only emitted when some prose contains math). Everything is
+escaped first; raw HTML is never interpreted.
 `toc = false` keeps the section's declarations out of the compact top navigation. A dotted Lean name must be
 quoted, or TOML reads it as a nested table.
 
