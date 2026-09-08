@@ -359,13 +359,14 @@ def status_badge(d: ConeDecl) -> str:
 _FENCE_RE = re.compile(r"^[ \t]*```[^\n]*\n(.*?)\n[ \t]*```[ \t]*$", re.S | re.M)
 # Inline code, display math, inline math. Code closes on the same line; math never crosses a
 # backtick, inline math never crosses a line, and (as in pandoc) an opening `$` is not followed
-# by whitespace or a digit — so a stray "$5" or an unclosed delimiter stays literal text.
-_INLINE_RE = re.compile(r"(`[^`\n]+`|\$\$(?:(?!\$\$)[^`])+?\$\$|\$(?![\s\d$])[^$`\n]+?(?<!\s)\$)", re.S)
+# by whitespace and a closing one is not followed by a digit — so "$5 and $6" or an unclosed
+# delimiter stays literal text.
+_INLINE_RE = re.compile(r"(`[^`\n]+`|\$\$(?:(?!\$\$)[^`])+?\$\$|\$(?![\s$])[^$`\n]+?(?<!\s)\$(?!\d))", re.S)
 _LIST_ITEM_RE = re.compile(r"^[ \t]*(?:[-*•]|\d+[.)])[ \t]+")
 _STRONG_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
 _EM_RE = re.compile(r"(?<![\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])")
 
-KATEX_VERSION = "0.16.22"
+KATEX_VERSION = "0.18.5"
 KATEX_CDN = f"https://cdnjs.cloudflare.com/ajax/libs/KaTeX/{KATEX_VERSION}"
 KATEX_HEAD = f"<link rel='stylesheet' href='{KATEX_CDN}/katex.min.css'>"
 KATEX_SCRIPT = (

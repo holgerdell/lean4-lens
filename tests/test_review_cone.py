@@ -306,6 +306,9 @@ def test_prose_renders_math_lists_and_emphasis() -> None:
         "<p class='summary'>costs $5 and <code>$x$</code> and <span class='math'>a*b*c</span></p>"
     )
     assert R.prose_html("2 * 3 * 4") == "<p class='summary'>2 * 3 * 4</p>"
+    assert R.prose_html("from $0 < x$ to $1/2$, $5 and $6") == (
+        "<p class='summary'>from <span class='math'>0 &lt; x</span> to <span class='math'>1/2</span>, $5 and $6</p>"
+    )
 
 
 def test_katex_included_only_when_prose_has_math(tmp_path: Path) -> None:
