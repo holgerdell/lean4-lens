@@ -668,12 +668,17 @@ def linkify_chunk(chunk: str, ctx: LinkCtx) -> str:
     if chunk.endswith(".") and chunk[:-1] in proj_full:
         return proj_link(chunk[:-1], chunk[:-1]) + "."
 
-    # 2. dotted chunk (dot-notation chain): the head segment is a term/namespace
-    #    qualifier — never linked here. Only the projection/method segments after
-    #    the head are link candidates.
+    # 2. dotted chunk (dot-notation chain): the head segment links only when it
+    #    is a project decl and not a local binder (`independentSetAlgorithm.tree`,
+    #    but not `S.graph` or `Nat.succ`). The projection/method segments after
+    #    the head are link candidates as before.
     if "." in chunk:
         segs = chunk.split(".")
-        rendered = [html.escape(segs[0])]
+        head = resolve_final(segs[0]) if segs[0] not in ctx.binders else None
+        if head and head[0] == "proj":
+            rendered = [proj_link(head[1], segs[0])]
+        else:
+            rendered = [html.escape(segs[0])]
         for seg in segs[1:]:
             r = resolve_final(seg, dotted=True) if seg else None
             if r:

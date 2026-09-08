@@ -142,6 +142,14 @@ def test_field_projection_links_to_its_structure_and_says_so() -> None:
     assert link in linkify(src, ctx)
 
 
+def test_head_of_dotted_chain_links_when_it_is_a_project_decl() -> None:
+    src = "theorem t (S : Sys) : (independentSetAlgorithm.tree S).numLeaves ≤ S.graph.card"
+    ctx = _ctx("Ns.t", ["Ns.independentSetAlgorithm", "Ns.Sys", "Ns.Sys.graph"], src=src)
+    out = linkify(src, ctx)
+    assert '<a class="proj" href="#d-Ns_46independentSetAlgorithm">independentSetAlgorithm</a>.tree' in out
+    assert "S.<a" in out and ">S</a>" not in out
+
+
 def test_universe_annotated_name_is_linked() -> None:
     src = "theorem t : ∃ G : TemporalGraph.{0}, True"
     ctx = _ctx("TemporalGraph.t", ["TemporalGraph"], src=src)
