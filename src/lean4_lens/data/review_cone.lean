@@ -501,7 +501,9 @@ def libModules (root : System.FilePath) (lib : String) : IO (Array Name) := do
 
 /-- Run a `MetaM` action against a freshly imported environment `env` in `IO`. -/
 def runMeta {α : Type} (env : Environment) (act : MetaM α) : IO α := do
-  let ctx : Core.Context := { fileName := "<review_cone>", fileMap := FileMap.ofString "" }
+  -- no heartbeat budget: walking a large proof term is the job, not a runaway
+  let ctx : Core.Context :=
+    { fileName := "<review_cone>", fileMap := FileMap.ofString "", maxHeartbeats := 0 }
   let (a, _) ← (act.run').toIO ctx { env := env }
   return a
 
