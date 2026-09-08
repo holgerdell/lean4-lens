@@ -31,7 +31,7 @@ Usage:
     lean4-lens review-cone --project path/to/proj   # a specific project
     lean4-lens review-cone --config path/to.toml    # a specific config
     lean4-lens review-cone --json cone.json         # render an existing JSON, skip the Lean run
-    lean4-lens review-cone --no-build --toc-support --out out.html --title "My Formalization"
+    lean4-lens review-cone --toc-support --out out.html --title "My Formalization"
 
 `lean4-lens emit-refs` shares this file's Lean emitter to write `dep-graph.json`
 for `lean4-lens refs` — data, not a document.
@@ -174,46 +174,17 @@ def run_emitter_process(command: list[str], root: Path, env: dict[str, str]) -> 
 
 
 def run_review_cone(
-    root: Path, libs: list[str], roots: list[str], out_json: Path, build: bool, *,
+    root: Path, libs: list[str], roots: list[str], out_json: Path, *,
     deps: bool = False, imports: list[str] | None = None
 ) -> None:
-    """Build the libraries (or explicit imports), then emit Lean-derived JSON. `deps`
+    """Emit Lean-derived JSON from the libraries (or explicit imports) as they
+    are already built; modules with no compiled `.olean` are skipped. `deps`
     selects the dependency graph's data rather than the review document's, and
     ignores `roots` (see `REVIEW_CONE_DEPS` in review_cone.lean). `imports`
     narrows entry modules only; `libs` still classifies all project declarations.
     """
     if deps and imports is not None:
         raise ValueError("dependency graphs require all project modules")
-    targets = imports if imports is not None else libs
-    if build:
-        print("  " + cli.dim(f"lake build {' '.join(targets)} …"))
-        warm = subprocess.run(["lake", "build", *targets], cwd=root, capture_output=True, text=True)
-        if warm.returncode != 0:
-            # Build failed, but lake still writes .olean files for every module
-            # that itself compiled cleanly — only the broken modules (and
-            # anything that transitively imports them) are missing theirs.
-            # review_cone.lean's libModules/pruneAndImport already skip modules
-            # with no compiled .olean, so a partial cone is still worth emitting:
-            # warn and continue rather than aborting the whole pipeline.
-            body = (warm.stdout + warm.stderr).strip()
-            if body:
-                print(body)
-            print(
-                cli.red("⚠ lake build failed") + " — continuing with a partial cone (modules that failed to"
-                " build, or depend on one that did, are skipped below)."
-            )
-        else:
-            # Success: drop warning noise (stale-manifest notice, per-decl
-            # `sorry` warnings, the `⚠` replay markers they trigger) and print
-            # only the remaining signal (progress/completion lines).
-            for line in warm.stdout.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("warning:"):
-                    continue
-                if stripped.startswith("⚠"):
-                    continue
-                if stripped:
-                    print(line)
     env = {
         **os.environ,
         "REVIEW_CONE_OUT": str(out_json),
@@ -1288,7 +1259,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Source root for snippets (default: the JSON's projectRoot / the project).",
     )
-    ap.add_argument("--no-build", action="store_true", help="Skip `lake build` before running the emitter.")
     ap.add_argument(
         "--config",
         type=Path,
@@ -1356,9 +1326,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Derive the JSON name from the config so multiple cones (multiple
         # configs) in one project don't clobber each other's JSON.
         json_path = project_root / (config_path.stem + ".json")
-        run_review_cone(
-            project_root, libs, config["roots"], json_path, build=not args.no_build, imports=config["imports"]
-        )
+        run_review_cone(project_root, libs, config["roots"], json_path, imports=config["imports"])
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
 
@@ -1399,7 +1367,7 @@ def dep_graph_main(argv: Sequence[str] | None = None) -> int:
         prog="lean4-lens emit-refs",
         description=(
             f"Emit {DEP_GRAPH_NAME} — every project decl with its proof refs — "
-            "for `lean4-lens refs`. Chain: `lake build`, then `emit-refs --no-build`, "
+            "for `lean4-lens refs`. Chain: `lake build`, then `emit-refs`, "
             "then `refs check data-complete`."
         ),
     )
@@ -1409,7 +1377,6 @@ def dep_graph_main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument(
         "--out", type=Path, default=Path(DEP_GRAPH_NAME), help=f"Output path (default: <project>/{DEP_GRAPH_NAME})."
     )
-    ap.add_argument("--no-build", action="store_true", help="Skip `lake build` before running the emitter.")
     args = ap.parse_args(argv)
 
     if shutil.which("lake") is None:
@@ -1422,7 +1389,7 @@ def dep_graph_main(argv: Sequence[str] | None = None) -> int:
         print(cli.red("✗ no lean_lib found in the lakefile"), file=sys.stderr)
         return 1
     out_json = args.out if args.out.is_absolute() else project_root / args.out
-    run_review_cone(project_root, libs, [], out_json, build=not args.no_build, deps=True)
+    run_review_cone(project_root, libs, [], out_json, deps=True)
     cli.clear_transient()
     cli.wrote(out_json, "every project decl, proof refs included")
     return 0

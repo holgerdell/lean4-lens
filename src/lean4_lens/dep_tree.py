@@ -9,7 +9,7 @@ field of `dep-graph.json` (written by `lean4-lens emit-refs`). There is no
 text-matching fallback — a decl absent from the data gets no edges and is
 reported by `check data-complete`, never guessed at.
 
-Chain: first `lake build`, then `lean4-lens emit-refs --no-build`, then
+Chain: first `lake build`, then `lean4-lens emit-refs`, then
 `lean4-lens refs ...`. Missing data yields zero edges and is reported, never
 guessed. Old names (`dep-tree` for the command, flat subcommands such as
 `summary`/`coverage`/`from`) stay as aliases for one release.

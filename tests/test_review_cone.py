@@ -245,12 +245,12 @@ def test_narrow_imports_preserve_project_classification(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(R, "run_emitter_process", run)
     R.run_review_cone(tmp_path, ["Entry", "Support"], ["result"], tmp_path / "out.json",
-                      False, imports=config["imports"])
+                      imports=config["imports"])
     assert captured["REVIEW_CONE_LIBS"] == "Entry,Support"
     assert captured["REVIEW_CONE_IMPORTS"] == "Entry"
     assert "REVIEW_CONE_DEPS" not in captured
     with pytest.raises(ValueError, match="all project modules"):
-        R.run_review_cone(tmp_path, ["Entry"], [], tmp_path / "deps.json", False, deps=True, imports=["Entry"])
+        R.run_review_cone(tmp_path, ["Entry"], [], tmp_path / "deps.json", deps=True, imports=["Entry"])
 
 
 def test_progress_and_large_stdout_are_both_preserved(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

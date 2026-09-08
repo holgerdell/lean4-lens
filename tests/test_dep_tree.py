@@ -1263,7 +1263,7 @@ class _EmitterTests(_MixinBase):
         """Run the Lean emitter, writing JSON to `out`. Goes through the
         command's own code path, so a broken invocation fails here too."""
         libs = P.read_lib_names(cls.project)
-        R.run_review_cone(cls.project, libs, list(roots), out, build=False, deps=deps)
+        R.run_review_cone(cls.project, libs, list(roots), out, deps=deps)
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -1355,7 +1355,7 @@ class _EmitterTests(_MixinBase):
         out = Path(self.tmp.name) / "module-cone.json"
         R.run_review_cone(self.project, P.read_lib_names(self.project),
                           ["Fixture.Module.clean", "Fixture.Module.usesExtra", "Fixture.Module.unfinished"],
-                          out, False, imports=["Fixture.Module"])
+                          out, imports=["Fixture.Module"])
         decls = {d["name"]: d for d in json.loads(out.read_text())["project"]}
         self.assertIn("Fixture.Module.offset", decls)
         self.assertEqual(decls["Fixture.Module.clean"]["status"], "verified")

@@ -11,12 +11,12 @@ Project-independent: the project root is the nearest lakefile (`.lean` or `.toml
 walking up from --project/CWD, and the libraries to time are the `lean_lib` names
 declared there (override with --lib / narrow with --exclude).
 
-Prerequisite: a warm build so dependency oleans exist. By default the script runs
-`lake build` once first; pass --no-build to skip that.
+Prerequisite: a warm build so dependency oleans exist — run `lake build` yourself
+before this.
 
 Usage:
     lean4-lens build-times
-    lean4-lens build-times --project path/to/proj --runs 3 --no-build
+    lean4-lens build-times --project path/to/proj --runs 3
     lean4-lens build-times --lib Coloring --lib Branching --exclude Old
     lean4-lens build-times --output /tmp/times.jsonl
 """
@@ -117,9 +117,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--runs", type=int, default=1, help="Timed runs per module; the minimum is reported (default: 1)."
     )
-    parser.add_argument(
-        "--no-build", action="store_true", help="Skip the initial `lake build` warm-up (assume oleans are current)."
-    )
     args = parser.parse_args(argv)
 
     if args.runs < 1:
@@ -143,16 +140,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     cli.kv("project", cli.dim(str(root)))
     cli.kv("libraries", cli.dim(", ".join(libs)))
     cli.kv("output", cli.dim(str(output)))
-
-    if not args.no_build:
-        # Warm the build so import closures have fresh oleans. Modules that do not
-        # compile in isolation are recorded with "ok": false rather than aborting.
-        cli.status("warming build (lake build) …")
-        warm = subprocess.run(["lake", "build"], cwd=root)
-        cli.clear_transient()
-        if warm.returncode != 0:
-            print(cli.red("✗ warm-up `lake build` failed") + " — fix the build first.", file=sys.stderr)
-            return warm.returncode
 
     cli.table_header(_COLS, caption=f"per-module `lake env lean` wall time · {len(modules)} modules")
     output.parent.mkdir(parents=True, exist_ok=True)

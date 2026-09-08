@@ -62,9 +62,9 @@ read before what it depends on:
   else the cone dragged in lands in a supporting catch-all, in topological
   order.
 
-The elaborator run needs `lake` on PATH. Options: `--no-build` skips the
-`lake build` warm-up, `--json FILE` re-renders JSON emitted earlier and skips
-the Lean run entirely, `--config`, `--out` and `--title` override the config,
+The elaborator run needs `lake` on PATH and reads the oleans as they are — build
+the project yourself first. Options: `--json FILE` re-renders JSON emitted
+earlier and skips the Lean run entirely, `--config`, `--out` and `--title` override the config,
 `--toc-support` lists the supporting declarations in the contents even when
 the config hides them,
 and `--lean-root` points the source snippets at a different tree.
@@ -180,8 +180,8 @@ release. Each command's `--help` is the authoritative list of its options; the
 sections below give the shape.
 
 These commands never modify your Lean sources, but they are not read-only:
-`review-cone` and `emit-refs` write their JSON next to the project (running
-`lake build` first, unless `--no-build`), `build-times` writes
+`review-cone` and `emit-refs` write their JSON next to the project,
+`build-times` writes
 `module_build_times.jsonl` and drives `lake`, and `refs show dead` writes
 `dead_candidates.jsonl` into the current directory. Every output path is
 overridable.
@@ -192,7 +192,7 @@ Runs the same Lean emitter as `review-cone`, but over every project
 declaration and writing `dep-graph.json`: each declaration with the
 declarations its proof refers to. That file is what `refs` reads.
 
-Chain: first `lake build`, then `lean4-lens emit-refs --no-build`, then
+Chain: first `lake build`, then `lean4-lens emit-refs`, then
 `lean4-lens refs check data-complete`.
 
 ### refs
@@ -250,8 +250,8 @@ Recompiles each module on its own with `lake env lean` and reports the
 wall-clock cost, sorted slowest first, to the terminal and to
 `module_build_times.jsonl` (`--output` redirects). Timing one module at a time
 avoids the core-stealing noise of a parallel build. `--runs N` reports the
-minimum of N timings; `--lib NAME` and `--exclude DIR` narrow what is measured;
-`--no-build` skips the `lake build` warm-up when the oleans are already current.
+minimum of N timings; `--lib NAME` and `--exclude DIR` narrow what is measured.
+It assumes the oleans are current, so run `lake build` first.
 
 ### Which files count as project code
 
