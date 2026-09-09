@@ -364,3 +364,27 @@ def test_interface_axiom_metadata_does_not_expose_theorem_proof(tmp_path: Path) 
     snippet, truncated = R.read_snippet(tmp_path, decl)
     assert snippet.endswith("theorem result (h : True := by trivial) : True")
     assert "exact h" not in snippet and not truncated
+
+
+def test_let_bound_statement_survives_the_proof_cut(tmp_path: Path) -> None:
+    (tmp_path / "Fixture.lean").write_text(
+        "/-- A statement that names its tree. -/\n"
+        "theorem result (n : Nat) : True := by\n"
+        "  trivial\n"
+    )
+    source = (
+        "/-- A statement that names its tree. -/\n"
+        "theorem result (n : Nat) :\n"
+        "    let t := tree n\n"
+        "    have h : Nat := n\n"
+        "    t.size = h :=\n"
+        "  proof n\n"
+    )
+    (tmp_path / "Fixture.lean").write_text(source)
+    decl = ConeDecl.from_json({
+        "name": "Fixture.result", "module": "Fixture", "kind": "theorem", "startLine": 1, "endLine": 6,
+    })
+    snippet, truncated = R.read_snippet(tmp_path, decl)
+    assert snippet.endswith("t.size = h")
+    assert "let t := tree n" in snippet and "have h : Nat := n" in snippet
+    assert "proof n" not in snippet and not truncated

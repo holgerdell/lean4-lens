@@ -447,6 +447,10 @@ def render_decl(
 _OPENERS = "([{⟨⦃"
 _CLOSERS = ")]}⟩⦄"
 
+# A `let`/`have` in a statement binds its value with a `:=` of its own, which
+# must not be read as the start of the proof.
+_LOCAL_BINDER_RE = re.compile(r"(?<![\w'?!])(?:let|have)(?![\w'?!])")
+
 
 def _statement_value_split(block: list[str]) -> tuple[int, int] | None:
     """Locate the proof-introducing `:=` in a theorem's source lines.
@@ -455,17 +459,23 @@ def _statement_value_split(block: list[str]) -> tuple[int, int] | None:
     not inside a comment or string literal — the boundary between statement and
     proof — or `None` if there is none. Comments (so the leading docstring is
     ignored) and strings are blanked first; a `:=` nested inside `()[]{}⟨⟩⦃⦄`
-    belongs to the statement.
+    belongs to the statement, and so does the one that binds a `let` or `have`
+    in the statement itself, which takes the next `:=` with it.
     """
-    depth = 0
+    depth, pending = 0, 0
     for idx, ln in enumerate(blank_comments_and_strings("\n".join(block)).split("\n")):
+        binders = {m.start() for m in _LOCAL_BINDER_RE.finditer(ln)}
         for i, c in enumerate(ln):
             if c in _OPENERS:
                 depth += 1
             elif c in _CLOSERS:
                 depth -= 1
+            elif depth == 0 and i in binders:
+                pending += 1
             elif c == ":" and depth == 0 and ln[i : i + 2] == ":=":
-                return idx, i
+                if pending == 0:
+                    return idx, i
+                pending -= 1
     return None
 
 
