@@ -100,6 +100,32 @@ def test_heading_names_the_document_a_formalization(tmp_path: Path) -> None:
     assert "<h1>Lean 4 formalization of <em>Fixture</em></h1>" in html
 
 
+def test_description_leads_the_page_and_replaces_the_default_intro(tmp_path: Path) -> None:
+    html = _render_fixture(
+        tmp_path,
+        'title = "Fixture"\ndescription = """The *ordinary* algorithm, with $1.23707^n$ leaves.\n\n'
+        '- counting independent sets\n"""\n',
+    )
+    assert "<div class='intro'><p class='summary'>The <em>ordinary</em> algorithm, with " in html
+    assert "<span class='math'>1.23707^n</span> leaves.</p>" in html
+    assert "<ul class='summary'><li>counting independent sets</li></ul></div>" in html
+    assert "Compare each mathematical statement" not in html
+    assert R.KATEX_HEAD in html
+
+
+def test_document_without_a_description_keeps_the_default_intro(tmp_path: Path) -> None:
+    html = _render_fixture(tmp_path, 'title = "Fixture"\n')
+    assert "<p class='intro'>Compare each mathematical statement" in html
+
+
+def test_empty_description_is_rejected(tmp_path: Path) -> None:
+    config = tmp_path / "review-cone.toml"
+    config.write_text('description = "  "\n[[section]]\ntitle = "Results"\ndecls = []\n')
+    with pytest.raises(C.ConfigError) as excinfo:
+        C.load_config(config)
+    assert "`description` must be a non-empty string" in str(excinfo.value.code)
+
+
 def test_intro_spells_out_how_much_the_document_covers(tmp_path: Path) -> None:
     html = _render_fixture(tmp_path, 'title = "Fixture"\n', n_decls=3)
     assert "The three results are grouped into sections" in html

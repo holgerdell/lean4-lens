@@ -77,6 +77,7 @@ in the order they should be read, and the sections they are grouped into:
 
 ```toml
 title = "My Formalization"
+description = "What this document proves, in one or more paragraphs of prose."
 out = "docs/review-cone.html"
 
 [[section]]
@@ -106,7 +107,9 @@ Every named decl is a root, and the cone is the transitive closure of them all.
 A decl may be named in only one section. `title` and `out` (relative to the
 project root) name the document itself; `--title`/`--out` override them, and
 without them the document is written next to the project as
-`<config-stem>.html`.
+`<config-stem>.html`. The optional `description` leads the page, in the same
+markdown-and-math subset as the prose below; without one the page opens with a
+generic sentence.
 
 The document presents each section on one subtle background, with a shared
 entry title and filepath above two columns: prose on the left, always-visible

@@ -22,8 +22,9 @@ implicit `[support]` catch-all (rendered last, topologically sorted, listed in
 the sidebar contents unless `support.toc = false`; --toc-support forces it on).
 Optional display titles and prose summaries live in section-local
 `[section.titles]` / `[section.summaries]` tables; the document's
-own `title` and `out` path (relative to the project root) are top-level keys,
-overridable with --title/--out. There is no in-source attribute and no
+own `title`, `description` (prose leading the page, in the same markdown subset)
+and `out` path (relative to the project root) are top-level keys, with
+--title/--out overriding two of them. There is no in-source attribute and no
 paper/LaTeX coupling.
 
 Usage:
@@ -851,7 +852,8 @@ a { color: var(--link); text-underline-offset: 3px; }
 a:focus-visible, summary:focus-visible, pre:focus-visible { outline: 3px solid #b87a39; outline-offset: 3px; }
 summary { cursor: pointer; }
 h1 { font: 400 30px/1.25 var(--font-heading); margin: 8px 0 12px; }
-.intro { font-size: 15px; margin: 0 0 12px; }
+.intro { font-size: 15px; margin: 0 0 12px; max-width: 85ch; }
+.intro .summary:last-child { margin-bottom: 12px; }
 .about, .verification { font-size: 13px; margin: 10px 0; }
 .about p { max-width: 85ch; }
 .verification > summary { color: var(--accent); }
@@ -1172,7 +1174,9 @@ def render(
         f"<title>{html.escape(title)}</title>",
         f"<style>{CSS}</style>", "</head><body>",
         f"<header class='page-heading'><h1>Lean 4 formalization of <em>{html.escape(ptitle)}</em></h1>",
-        "<p class='intro'>Compare each mathematical statement with its Lean declaration. "
+        f"<div class='intro'>{prose_html(config['description'])}</div>"
+        if config["description"]
+        else "<p class='intro'>Compare each mathematical statement with its Lean declaration. "
         "Follow linked terms to their definitions below.</p>",
         "<details class='about'><summary>About this review</summary>",
         "<p>Lean's type checker guarantees the proofs are logically correct, but "

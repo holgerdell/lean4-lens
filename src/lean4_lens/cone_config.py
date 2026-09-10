@@ -47,6 +47,7 @@ class ReviewConeConfig(TypedDict):
     info: InfoConfig | None
     roots: list[str]
     title: str | None
+    description: str | None
     out: str | None
     imports: list[str] | None
 
@@ -112,6 +113,7 @@ def load_config(path: Path) -> ReviewConeConfig:
          "info": {"heading": str, "text": str, "url": str} | None,
          "roots": [name],          # union of all section decls, order-preserving
          "title": str | None,      # document title (CLI --title overrides)
+         "description": str | None,  # prose leading the document, in the markdown subset
          "out": str | None}        # output path, relative to the project root
     Every named decl is a root. Enforced invariants (each a hard error):
       * each `[[section]]` has a non-empty string `title` and a `decls` list of
@@ -181,6 +183,9 @@ def load_config(path: Path) -> ReviewConeConfig:
     doc_title = raw.get("title")
     if doc_title is not None and not isinstance(doc_title, str):
         raise ConfigError("`title` must be a string")
+    description = raw.get("description")
+    if description is not None and (not isinstance(description, str) or not description.strip()):
+        raise ConfigError("`description` must be a non-empty string")
     out = raw.get("out")
     if out is not None and not isinstance(out, str):
         raise ConfigError("`out` must be a string path")
@@ -198,6 +203,7 @@ def load_config(path: Path) -> ReviewConeConfig:
         "info": _read_info(raw),
         "roots": roots,
         "title": doc_title,
+        "description": description,
         "out": out,
     }
 
