@@ -1349,6 +1349,22 @@ class _EmitterTests(_MixinBase):
         self.assertIn("Fixture.Point", decls)
         self.assertFalse(any("_private." in ref for d in decls.values() for ref in d["refs"]))
 
+    def test_review_cone_links_proof_arguments_in_definitions(self) -> None:
+        if not (self.project / "Fixture" / "Basic.lean").is_file():
+            self.skipTest("requires the repository's Fixture declarations")
+        out = Path(self.tmp.name) / "proof-argument-cone.json"
+        self._run_emitter(out, deps=False, roots=["Fixture.algorithm"])
+        data = json.loads(out.read_text())
+        decls = {d["name"]: d for d in data["project"]}
+        self.assertIn("Fixture.sound", decls["Fixture.algorithm"]["refs"])
+        self.assertIn("Fixture.sound", decls)
+        config_path = Path(self.tmp.name) / "proof-argument-cone.toml"
+        config_path.write_text('[[section]]\ntitle = "Algorithm"\ndecls = ["Fixture.algorithm"]\n')
+        html = R.render(data, self.project, None, None, C.load_config(config_path), True, "../")
+        anchor = R.anchor_id("Fixture.sound")
+        self.assertIn(f"id='{anchor}'", html)
+        self.assertIn(f'href="#{anchor}">sound</a>', html)
+
     def test_module_cone_preserves_locations_and_axioms(self) -> None:
         if not (self.project / "Fixture" / "Module.lean").is_file():
             self.skipTest("requires the module-system fixture")

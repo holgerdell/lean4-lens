@@ -107,7 +107,8 @@ instances are erased: a proof used there as data, e.g. the argument of
 def eraseIrrelevant (e : Expr) (proofs : Bool := true) : MetaM Expr :=
   Meta.transform e (skipConstInApp := true)
     (pre := fun s => do
-      if (proofs && (← Meta.isProof s)) || (← isSubsingletonValue s) then
+      let erase ← if ← Meta.isProof s then pure proofs else isSubsingletonValue s
+      if erase then
         return .done (← mkSorry (← Meta.inferType s) true)
       return .continue)
 
@@ -213,8 +214,8 @@ def redirectParent? (env : Environment) (n : Name) (ci : ConstantInfo) : Option 
 
 /-- Transitive statement dependencies seeded from `roots`. Recurse through the
 statement constants of every project decl (definitions also expand their value);
-stop (collect, no recurse) at non-project (e.g. mathlib) decls. Roots' own values
-are never inspected. Structure-field projections and synthesized recursor/
+stop (collect, no recurse) at non-project (e.g. mathlib) decls. Root definitions
+expose their values too; theorem proofs stay hidden. Structure-field projections and synthesized recursor/
 eliminator/constructor companions redirect to their parent (recorded in
 `fields`) rather than being emitted as their own entry. Only the document's
 mode has roots; the graph's uses `allProject`. -/
@@ -228,7 +229,8 @@ partial def closure (env : Environment) (prefixes : Array Name) (roots : Array N
   let mut work : List Name := []
   for r in roots do
     if let some ci := env.find? r then
-      work := work ++ (← usedConsts env ci.type (erase := true)).toList
+      let withVal := match ci with | .thmInfo _ => false | _ => true
+      work := work ++ (← stmtConsts env ci withVal (eraseValue := true)).toList
   while !work.isEmpty do
     let n := work.head!
     work := work.tail!

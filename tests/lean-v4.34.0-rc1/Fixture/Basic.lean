@@ -40,3 +40,22 @@ instance : Weight Shape where
     | .seg p q => p.sum + q.sum
 
 end Fixture
+
+namespace Fixture
+
+/-- Size guarantees used to construct an algorithm. -/
+structure Sound : Prop where
+  valid : 0 = 0
+
+theorem sound : Sound := ⟨rfl⟩
+
+/-- An algorithm carrying a size guarantee. -/
+structure Algorithm where
+  size : Nat
+  valid : size = 0
+
+def Sound.toAlgorithm (h : Sound) : Algorithm := ⟨0, h.valid⟩
+
+def algorithm : Algorithm := sound.toAlgorithm
+
+end Fixture
