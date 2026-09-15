@@ -51,8 +51,10 @@ collect the cone from the roots named in `review-cone.toml`, and writes the
 document. Each declaration appears with its own source, ordered so nothing is
 read before what it depends on:
 
-- every reference to another project declaration is an internal link, every
-  mathlib or core reference a link to the mathlib4 docs;
+- source references use exact elaborator ranges from the compiled `.ilean` files:
+  project references link internally and mathlib/core references link to their docs;
+  local variables stay plain, and missing or stale `.ilean` data produces a warning
+  and plain source instead of guessed links;
 - each entry carries a status badge — verified (sorry-free, standard axioms
   only), tainted (extra axioms, which are listed), or sorry — plus its file and
   line span and a "used by" line back to its consumers in the cone;

@@ -53,7 +53,7 @@ import sys
 import tempfile
 import textwrap
 import urllib.parse
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +71,7 @@ from .project import (
     resolve_root_or_exit,
 )
 from .source import blank_comments_and_strings, iter_spans
+from .source_links import SourceRef, read_source_refs
 
 # The elaborator half of this tool, shipped as package data and handed to
 # `lake env lean --run`.
@@ -96,6 +97,8 @@ class ConeDecl:
     auto_name: bool | None
     snippet: str = ""
     truncated: bool = False
+    raw_snippet: str = ""
+    source_offset: int = 0
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> ConeDecl:
@@ -406,28 +409,30 @@ def _inline_html(text: str) -> str:
     return "".join(out)
 
 
-def split_docstring(snippet: str) -> tuple[str, str]:
-    """Move only a leading declaration docstring into the prose column.
-
-    Use the Lean scanner so nested comments cannot consume declaration code.
-    Field docs and comments within the definition stay with their source.
-    """
-    prefix = ""
+def docstring_ranges(snippet: str) -> tuple[str, list[tuple[int, int]]]:
+    """Separate a leading docstring while preserving exact source offsets for code."""
+    prefix_end = 0
     for lo, hi, kind in iter_spans(snippet):
         piece = snippet[lo:hi]
         if not piece.strip():
             continue
         if kind == "comment" and piece.startswith("/--"):
-            return piece[3:-2].strip(), prefix + snippet[hi:].lstrip("\n\r")
-        # `open … in` / `set_option … in` lines may precede the docstring.
-        if kind == "code" and not prefix and all(
+            start = hi + len(snippet[hi:]) - len(snippet[hi:].lstrip("\n\r"))
+            return piece[3:-2].strip(), [(0, prefix_end), (start, len(snippet))]
+        if kind == "code" and not prefix_end and all(
             ln.strip().endswith(" in") and ln.split()[0] in ("open", "set_option")
             for ln in piece.strip().splitlines()
         ):
-            prefix = piece
+            prefix_end = hi
             continue
         break
-    return "", snippet
+    return "", [(0, len(snippet))]
+
+
+def split_docstring(snippet: str) -> tuple[str, str]:
+    """Move only the leading declaration docstring into the prose column."""
+    doc, ranges = docstring_ranges(snippet)
+    return doc, "".join(snippet[lo:hi] for lo, hi in ranges)
 
 
 def render_decl(
@@ -545,18 +550,14 @@ def read_snippet(
         block = block[:max_lines]
         truncated = True
     snippet = "\n".join(block)
+    d.raw_snippet = snippet
+    d.source_offset = sum(len(line) + 1 for line in lines[:first])
     # Strip `\label{...}` cross-referencing plumbing from the docstring; if that
     # leaves the docstring empty, drop it entirely rather than collapsing it.
     snippet = re.sub(r"[ \t]*\\label\{[^}]*\}[ \t]*\n?", "", snippet)
     snippet = re.sub(r"^[ \t]*/--\s*-/[ \t]*\n?", "", snippet, flags=re.M)
     snippet = re.sub(r"^([ \t]*)/--[ \t]*\n\s*", r"\1/-- ", snippet, flags=re.M)
     return snippet, truncated
-
-
-# Lean identifier-ish chunk: anything that is not whitespace or a structural
-# delimiter (including floor and ceiling brackets). `^` is included so `f^[n]` (iterate notation) doesn't glue its
-# caret onto the preceding identifier and break the link lookup.
-_DELIM_RE = re.compile(r"([\s(){}\[\],;⟨⟩«»⌊⌋⌈⌉^])")
 
 
 @dataclass(frozen=True)
@@ -568,60 +569,16 @@ class Indexes:
     # cone entry of its own.
     proj_full: dict[str, ConeDecl | None]
     mlib_full: dict[str, MathlibDecl]
-    proj_final: dict[str, str]  # globally-unique final component -> full name
-    mlib_final: dict[str, str]
     proj_target: dict[str, str]  # full name -> anchor target (fields -> struct)
-    field_by_final: dict[str, list[str]]  # field's final component -> its full names
-    prop_fields: set[str]  # full names of the fields that hold a proof, not data
+    prop_fields: set[str]
 
 
 @dataclass(frozen=True)
 class LinkCtx:
-    """`Indexes` plus the decl being rendered: its own name (bold, not linked)
-    and its refs' final-component tables, which disambiguate shared names."""
+    """Exact link targets plus the declaration being rendered."""
 
     idx: Indexes
     define_name: str
-    define_final: str
-    local_final: dict[str, str]
-    local_qual_final: dict[str, str]
-    binders: frozenset[str] = frozenset()
-
-
-# Names bound by a binder group: `(Vertex : Type*)`, `{V : Type*}`, `[inst : C]`,
-# `⦃x y : α⦄` in a declaration's header, and `∀ x : α` / `∃ n : ℕ` anywhere.
-_NAMES = r"((?:[A-Za-z_][A-Za-z0-9_'!?]*\s+)*[A-Za-z_][A-Za-z0-9_'!?]*)"
-_GROUP_BINDER_RE = re.compile(r"[({\[⦃]\s*" + _NAMES + r"\s*:(?!=)")
-_QUANT_BINDER_RE = re.compile(r"[∀∃]\s*" + _NAMES + r"\s*:(?!=)")
-_HEADER_END_RE = re.compile(r":=|\bwhere\b|\|")
-
-
-def _header(code: str) -> str:
-    """The binder list of a declaration: the code up to the bracket-depth-0
-    colon that introduces its type, or to `:=` / `where` / `|` if that comes
-    first. A `(x : T)` past that point is a type ascription, not a binder."""
-    depth = 0
-    for i, ch in enumerate(code):
-        if ch in _OPENERS:
-            depth += 1
-        elif ch in _CLOSERS:
-            depth -= 1
-        elif depth == 0 and ch == ":" and not code.startswith(":=", i):
-            return code[:i]
-    m = _HEADER_END_RE.search(code)
-    return code[: m.start()] if m else code
-
-
-def local_binders(src: str) -> frozenset[str]:
-    """Names bound locally in `src`. A bare use of one must not resolve to an
-    unrelated project decl that shares its final component."""
-    code = "".join(text for text, is_code in split_code_comments(src) if is_code)
-    names: set[str] = set()
-    for m in _GROUP_BINDER_RE.finditer(_header(code)):
-        names.update(m.group(1).split())
-    for m in _QUANT_BINDER_RE.finditer(code):
-        names.update(m.group(1).split())
-    return frozenset(names)
 
 
 def build_indexes(
@@ -638,203 +595,66 @@ def build_indexes(
         proj_full.setdefault(fld, None)
         proj_target[fld] = struct
     mlib_full: dict[str, MathlibDecl] = {d.name: d for d in mathlib}
-    field_by_final: dict[str, list[str]] = defaultdict(list)
-    for fld in field_of:
-        field_by_final[fld.split(".")[-1]].append(fld)
-
-    def unique_final(names: list[str]) -> dict[str, str]:
-        cnt = Counter(n.split(".")[-1] for n in names)
-        return {f: n for n in names if cnt[f := n.split(".")[-1]] == 1}
-
-    return Indexes(
-        proj_full=proj_full,
-        mlib_full=mlib_full,
-        proj_final=unique_final(list(proj_full)),
-        mlib_final=unique_final(list(mlib_full)),
-        proj_target=proj_target,
-        field_by_final=field_by_final,
-        prop_fields=prop_fields or set(),
-    )
+    return Indexes(proj_full=proj_full, mlib_full=mlib_full, proj_target=proj_target, prop_fields=prop_fields or set())
 
 
-def linkify_chunk(chunk: str, ctx: LinkCtx) -> str:
-    """Wrap a single source chunk in a hyperlink if it names a known decl.
-    `ctx` carries the indexes and the name being *defined* (bold, not linked)."""
-    proj_full, mlib_full = ctx.idx.proj_full, ctx.idx.mlib_full
-    proj_final, mlib_final, proj_target = ctx.idx.proj_final, ctx.idx.mlib_final, ctx.idx.proj_target
-    define_name, define_final = ctx.define_name, ctx.define_final
-    local_final, local_qual_final = ctx.local_final, ctx.local_qual_final
+def linkify(src: str, ctx: LinkCtx, refs: Sequence[SourceRef], offset: int = 0) -> str:
+    """Link only compiler-confirmed ranges; unresolved and local names remain plain text."""
+    def render_ref(ref: SourceRef, text: str) -> str:
+        escaped = html.escape(text)
+        if ref.name == ctx.define_name:
+            return f'<strong class="self">{escaped}</strong>'
+        target = ctx.idx.proj_target.get(ref.name)
+        if target is not None:
+            if target == ctx.define_name:
+                return escaped
+            if target != ref.name:
+                return (f'<a class="proj field" href="#{anchor_id(target)}" '
+                        f'title="field of {html.escape(target)}">{escaped}</a>')
+            return f'<a class="proj" href="#{anchor_id(target)}">{escaped}</a>'
+        external = ctx.idx.mlib_full.get(ref.name)
+        if external is not None:
+            return (f'<a class="mlib" href="{html.escape(external.url)}" '
+                    f'target="_blank" rel="noopener">{escaped}</a>')
+        return escaped
 
-    def proj_link(full: str, text: str) -> str:
-        if full == define_name or text == define_name:
-            return f'<strong class="self">{html.escape(text)}</strong>'
-        target = proj_target.get(full, full)
-        if target == define_name:
-            return html.escape(text)  # a field of the decl being rendered: linking would point here
-        if target != full:  # a structure field: the link lands on the parent structure
-            return (
-                f'<a class="proj field" href="#{anchor_id(target)}" title="field of {html.escape(target)}">'
-                f"{html.escape(text)}</a>"
-            )
-        return f'<a class="proj" href="#{anchor_id(target)}">{html.escape(text)}</a>'
-
-    def mlib_link(full: str, text: str) -> str:
-        url = mlib_full[full].url
-        return f'<a class="mlib" href="{html.escape(url)}" target="_blank" rel="noopener">{html.escape(text)}</a>'
-
-    def resolve_final(seg: str, dotted: bool = False) -> tuple[str, str] | None:
-        """Resolve a final component to (kind, full_name). Prefer this decl's own
-        resolved refs (disambiguates names shared across modules), then fall back
-        to globally-unique final components. For a dot-notation access (`x.seg`),
-        prefer a qualified ref ending in `.seg`."""
-        full = None
-        if dotted:
-            full = local_qual_final.get(seg)
-        if full is None:
-            full = local_final.get(seg)
-        if full is None:
-            if seg in proj_final:
-                full = proj_final[seg]
-            elif seg in mlib_final:
-                full = mlib_final[seg]
-        if full is None:
-            return None
-        return ("proj" if full in proj_full else "mlib"), full
-
-    # 0. the declaration's own name (bare or qualified) -> bold self.
-    if chunk == define_name or chunk == define_final:
-        return f'<strong class="self">{html.escape(chunk)}</strong>'
-
-    # 1. exact full-name match; `TemporalGraph.{0}` tokenizes as `TemporalGraph.`
-    #    followed by the universe braces, so a trailing dot is linked too.
-    if chunk in proj_full:
-        return proj_link(chunk, chunk)
-    if chunk in mlib_full:
-        return mlib_link(chunk, chunk)
-    if chunk.endswith(".") and chunk[:-1] in proj_full:
-        return proj_link(chunk[:-1], chunk[:-1]) + "."
-
-    # 2. dotted chunk (dot-notation chain): the head segment links only when it
-    #    is a project decl and not a local binder (`independentSetAlgorithm.tree`,
-    #    but not `S.graph` or `Nat.succ`). The projection/method segments after
-    #    the head are link candidates as before.
-    if "." in chunk:
-        segs = chunk.split(".")
-        head = resolve_final(segs[0]) if segs[0] not in ctx.binders else None
-        if head and head[0] == "proj":
-            rendered = [proj_link(head[1], segs[0])]
-        else:
-            rendered = [html.escape(segs[0])]
-        for seg in segs[1:]:
-            r = resolve_final(seg, dotted=True) if seg else None
-            if r:
-                kind, full = r
-                rendered.append(proj_link(full, seg) if kind == "proj" else mlib_link(full, seg))
-            else:
-                rendered.append(html.escape(seg))
-        return ".".join(rendered)
-
-    # 3. bare token matched by final component — unless it is a local binder
-    if chunk in ctx.binders:
-        return html.escape(chunk)
-    r = resolve_final(chunk)
-    if r:
-        kind, full = r
-        return proj_link(full, chunk) if kind == "proj" else mlib_link(full, chunk)
-    return html.escape(chunk)
-
-
-def split_code_comments(src: str) -> list[tuple[str, bool]]:
-    """Split Lean source into (text, is_code) spans. Block comments `/- … -/`
-    (incl. docstrings `/-- … -/`, nested) and line comments `--` are is_code=False;
-    string literals stay in the code spans (their words may still be linkified)."""
-    spans: list[tuple[str, bool]] = []
-    for lo, hi, kind in iter_spans(src):
-        is_code = kind != "comment"
-        if spans and spans[-1][1] == is_code:
-            spans[-1] = (spans[-1][0] + src[lo:hi], is_code)
-        else:
-            spans.append((src[lo:hi], is_code))
-    return spans
-
-
-# The left-hand side of a `where` field assignment: a field name, then its
-# binders, then `:=`. Matched per line, so it cannot span a term.
-_FIELD_LHS_RE = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_'!?]*)((?:\s+(?:_|[A-Za-z_][A-Za-z0-9_'!?]*))*\s*:=)")
-
-
-def linkify_code(text: str, ctx: LinkCtx) -> str:
+    # Conflicting or overlapping elaborator ranges have no single unambiguous target.
+    candidates = sorted(set(r for r in refs if offset <= r.start < r.end <= offset + len(src)))
+    safe = [r for i, r in enumerate(candidates)
+            if not any(other.start < r.end and r.start < other.end
+                       for j, other in enumerate(candidates) if i != j)]
     out = []
-    for part in _DELIM_RE.split(text):
-        if part == "" or _DELIM_RE.fullmatch(part):
-            out.append(html.escape(part))
-        else:
-            out.append(linkify_chunk(part, ctx))
-    return "".join(out)
-
-
-def struct_of_where_block(src: str, idx: Indexes) -> str | None:
-    """The structure a `where` block builds, guessed from the field names it
-    assigns: each unambiguous one votes for its structure, and the winner names
-    the block. `None` when nothing votes."""
-    votes: Counter[str] = Counter()
-    for line in src.splitlines():
-        m = _FIELD_LHS_RE.match(line)
-        if m is None:
+    for lo, hi, kind in iter_spans(src):
+        if kind != "code":
+            text = html.escape(src[lo:hi])
+            out.append(f'<span class="cmt">{text}</span>' if kind == "comment" else text)
             continue
-        fulls = idx.field_by_final.get(m.group(2), [])
-        if len(fulls) == 1:
-            votes[idx.proj_target.get(fulls[0], fulls[0])] += 1
-    return votes.most_common(1)[0][0] if votes else None
-
-
-def linkify_code_line(line: str, ctx: LinkCtx, struct: str | None) -> tuple[str, bool]:
-    """One line of code, and whether it assigns a proof field. A field assignment
-    names a field of `struct`, the structure being built, so its left-hand side
-    links there — never to an unrelated decl that happens to share the name. With
-    no `struct`, only a name that is a field of exactly one structure is linked."""
-    m = _FIELD_LHS_RE.match(line)
-    if m is None:
-        return linkify_code(line, ctx), False
-    name = m.group(2)
-    fulls = ctx.idx.field_by_final.get(name, [])
-    if struct is not None:
-        target = struct
-    elif len(fulls) == 1:
-        target = ctx.idx.proj_target.get(fulls[0], fulls[0])
-    else:
-        return linkify_code(line, ctx), False
-    if target == ctx.define_name:
-        return linkify_code(line, ctx), False
-    link = f'<a class="proj" href="#{anchor_id(target)}">{html.escape(name)}</a>'
-    rendered = html.escape(m.group(1)) + link + html.escape(m.group(3)) + linkify_code(line[m.end() :], ctx)
-    return rendered, f"{target}.{name}" in ctx.idx.prop_fields
-
-
-def linkify_code_block(text: str, ctx: LinkCtx, struct: str | None) -> str:
-    """A run of code lines. A proof field's assignment is greyed, and so are the
-    lines its proof continues onto — the ones indented deeper than it."""
+        pos = lo
+        for ref in safe:
+            start, end = ref.start - offset, ref.end - offset
+            if lo <= start < end <= hi:
+                out.append(html.escape(src[pos:start]))
+                out.append(render_ref(ref, src[start:end]))
+                pos = end
+        out.append(html.escape(src[pos:hi]))
+    # Preserve muted proof-field bodies using the resolved field, never its short name.
+    rendered_lines = "".join(out).splitlines(keepends=True)
     out = []
     proof_indent: int | None = None
-    for line in text.splitlines(keepends=True):
-        indent = len(line) - len(line.rstrip("\n").lstrip())
-        rendered, is_proof = linkify_code_line(line, ctx, struct)
+    line_start = offset
+    for line, rendered in zip(src.splitlines(keepends=True), rendered_lines, strict=True):
+        indent = len(line) - len(line.lstrip())
+        is_proof = any(
+            r.name in ctx.idx.prop_fields and r.start == line_start + indent
+            and r.end <= line_start + len(line) and ":=" in line[r.end - line_start:]
+            for r in safe
+        )
         if is_proof:
             proof_indent = indent
-        elif proof_indent is not None and (line.strip() == "" or indent <= proof_indent):
+        elif proof_indent is not None and (not line.strip() or indent <= proof_indent):
             proof_indent = None
-        out.append(f'<span class="proof">{rendered}</span>' if is_proof or proof_indent is not None else rendered)
-    return "".join(out)
-
-
-def linkify(src: str, ctx: LinkCtx) -> str:
-    struct = struct_of_where_block(src, ctx.idx)
-    out = []
-    for text, is_code in split_code_comments(src):
-        if not is_code:
-            out.append(f'<span class="cmt">{html.escape(text)}</span>')
-            continue
-        out.append(linkify_code_block(text, ctx, struct))
+        out.append(f'<span class="proof">{rendered}</span>' if proof_indent is not None else rendered)
+        line_start += len(line)
     return "".join(out)
 
 
@@ -977,6 +797,11 @@ def render(
     for d in project:
         d.snippet, d.truncated = read_snippet(lean_root, d, max_lines=sys.maxsize, cache=module_lines)
 
+    module_refs = {
+        module: read_source_refs(lean_root, module, "\n".join(lines) + "\n")
+        for module, lines in module_lines.items()
+    }
+
     # Reverse dependency map: for each project decl, who in the cone uses it.
     # A ref to a structure field counts as a use of the parent struct
     # (proj_target normalizes fields -> struct, same as the linkifier).
@@ -1057,23 +882,13 @@ def render(
 
     def _entry(d: ConeDecl) -> str:
         name = d.name
-        local_by_final: dict[str, set[str]] = {}
-        local_by_qfinal: dict[str, set[str]] = {}
-        for r in d.refs:
-            if r in proj_full or r in idx.mlib_full:
-                local_by_final.setdefault(r.split(".")[-1], set()).add(r)
-                if "." in r:  # qualified refs only, for dot-notation access
-                    local_by_qfinal.setdefault(r.split(".")[-1], set()).add(r)
-        ctx = LinkCtx(
-            idx=idx,
-            define_name=name,
-            define_final=name.split(".")[-1],
-            local_final={f: next(iter(s)) for f, s in local_by_final.items() if len(s) == 1},
-            local_qual_final={f: next(iter(s)) for f, s in local_by_qfinal.items() if len(s) == 1},
-            binders=local_binders(d.snippet),
-        )
+        ctx = LinkCtx(idx=idx, define_name=name)
         docstring, snippet = split_docstring(d.snippet)
-        body = linkify(snippet, ctx) if snippet else "<span class='trunc'>(source not found)</span>"
+        _, ranges = docstring_ranges(d.raw_snippet)
+        body = "".join(
+            linkify(d.raw_snippet[lo:hi], ctx, module_refs.get(d.module, ()), d.source_offset + lo)
+            for lo, hi in ranges
+        ) if snippet else "<span class='trunc'>(source not found)</span>"
         tag = " <span class='trunc'>… (truncated)</span>" if d.truncated else ""
         file_disp = module_path(d.module).as_posix()
         href = html.escape(f"{src_prefix}{urllib.parse.quote(file_disp)}#L{d.start_line}")
@@ -1250,7 +1065,6 @@ def render(
     if "class='math" in doc:  # KaTeX only when some prose carries math
         doc = doc.replace("</head>", KATEX_HEAD + "</head>", 1).replace("</body>", KATEX_SCRIPT + "</body>", 1)
     return doc
-
 
 
 def main(argv: Sequence[str] | None = None) -> int:

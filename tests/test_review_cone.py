@@ -7,7 +7,21 @@ import pytest
 
 from lean4_lens import cone_config as C
 from lean4_lens import review_cone as R
-from lean4_lens.review_cone import ConeDecl, LinkCtx, build_indexes, linkify
+from lean4_lens.review_cone import ConeDecl, LinkCtx, build_indexes
+from lean4_lens.source_links import SourceRef
+
+
+def _linkify(src: str, ctx: LinkCtx, targets: dict[str, str] | None = None) -> str:
+    """Explicit compiler-style ranges for small renderer fixtures."""
+    refs: list[SourceRef] = []
+    for text, name in (targets or {}).items():
+        refs.extend(SourceRef(m.start(), m.end(), name) for m in re.finditer(re.escape(text), src))
+    name = ctx.define_name.rsplit(".", 1)[-1]
+    match = re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", src)
+    assert match is not None
+    start = match.start()
+    refs.append(SourceRef(start, start + len(name), ctx.define_name, True))
+    return R.linkify(src, ctx, sorted(refs))
 
 
 @pytest.mark.parametrize("left,right", [("⌊", "⌋₊"), ("⌈", "⌉₊"), ("⌊", "⌋"), ("⌈", "⌉")])
@@ -15,9 +29,9 @@ from lean4_lens.review_cone import ConeDecl, LinkCtx, build_indexes, linkify
 def test_rounding_notation_links(left: str, right: str, term: str) -> None:
     name = "FiniteTemporalGraph.lowerTimeScale"
     idx = build_indexes([ConeDecl.from_json({"name": name})], [], {})
-    ctx = LinkCtx(idx, "FiniteTemporalGraph.lowerSteps", "lowerSteps", {"lowerTimeScale": name}, {})
+    ctx = LinkCtx(idx, "FiniteTemporalGraph.lowerSteps")
     source = f"def lowerSteps (Δ : ℕ) (φ : ℝ) : ℕ∞ := {left}{term}{right}"
-    result = linkify(source, ctx)
+    result = _linkify(source, ctx, {"lowerTimeScale": name})
     link = '<a class="proj" href="#d-FiniteTemporalGraph_46lowerTimeScale">lowerTimeScale</a>'
     expected = source.replace("lowerSteps", '<strong class="self">lowerSteps</strong>').replace("lowerTimeScale", link)
     assert result == expected
@@ -151,27 +165,27 @@ def test_malformed_info_table_is_rejected(tmp_path: Path, info: str, message: st
 
 def _ctx(defined: str, project: list[str], field_of: dict[str, str] | None = None, src: str = "") -> LinkCtx:
     idx = build_indexes([ConeDecl.from_json({"name": n}) for n in project], [], field_of or {})
-    return LinkCtx(idx, defined, defined.split(".")[-1], {}, {}, R.local_binders(src))
+    return LinkCtx(idx, defined)
 
 
 def test_local_binder_is_not_linked_to_a_decl_sharing_its_name() -> None:
     src = "structure FiniteSimpleGraph (Vertex : Type*) where\n  fintypeVertex : Fintype Vertex"
     field_of = {"TemporalGraph.Vertex": "TemporalGraph"}
     ctx = _ctx("FiniteSimpleGraph", ["FiniteSimpleGraph", "TemporalGraph"], field_of, src)
-    assert "href" not in linkify(src, ctx).replace('<strong class="self">FiniteSimpleGraph</strong>', "")
+    assert "href" not in _linkify(src, ctx).replace('<strong class="self">FiniteSimpleGraph</strong>', "")
 
 
 def test_field_projection_links_to_its_structure_and_says_so() -> None:
     src = "def vertexCount (G : TemporalGraph) : ℕ := Fintype.card G.Vertex"
     ctx = _ctx("TemporalGraph.vertexCount", ["TemporalGraph"], {"TemporalGraph.Vertex": "TemporalGraph"}, src)
     link = '<a class="proj field" href="#d-TemporalGraph" title="field of TemporalGraph">Vertex</a>'
-    assert link in linkify(src, ctx)
+    assert link in _linkify(src, ctx, {"Vertex": "TemporalGraph.Vertex"})
 
 
 def test_head_of_dotted_chain_links_when_it_is_a_project_decl() -> None:
     src = "theorem t (S : Sys) : (independentSetAlgorithm.tree S).numLeaves ≤ S.graph.card"
     ctx = _ctx("Ns.t", ["Ns.independentSetAlgorithm", "Ns.Sys", "Ns.Sys.graph"], src=src)
-    out = linkify(src, ctx)
+    out = _linkify(src, ctx, {"independentSetAlgorithm": "Ns.independentSetAlgorithm", "graph": "Ns.Sys.graph"})
     assert '<a class="proj" href="#d-Ns_46independentSetAlgorithm">independentSetAlgorithm</a>.tree' in out
     assert "S.<a" in out and ">S</a>" not in out
 
@@ -179,7 +193,8 @@ def test_head_of_dotted_chain_links_when_it_is_a_project_decl() -> None:
 def test_universe_annotated_name_is_linked() -> None:
     src = "theorem t : ∃ G : TemporalGraph.{0}, True"
     ctx = _ctx("TemporalGraph.t", ["TemporalGraph"], src=src)
-    assert '<a class="proj" href="#d-TemporalGraph">TemporalGraph</a>.{0}' in linkify(src, ctx)
+    out = _linkify(src, ctx, {"TemporalGraph": "TemporalGraph"})
+    assert '<a class="proj" href="#d-TemporalGraph">TemporalGraph</a>.{0}' in out
 
 
 def test_document_has_top_navigation(tmp_path: Path) -> None:
@@ -215,8 +230,8 @@ def test_title_and_summary_lead_the_entry(tmp_path: Path) -> None:
 def test_type_ascription_is_not_mistaken_for_a_binder() -> None:
     src = "def t (G : TemporalGraph) : ℕ := (vertexCount G : ℕ) + (Δ : ℝ)^2"
     ctx = _ctx("Fixture.t", ["TemporalGraph", "TemporalGraph.vertexCount"], src=src)
-    assert '<a class="proj" href="#d-TemporalGraph_46vertexCount">vertexCount</a>' in linkify(src, ctx)
-    assert R.local_binders(src) == {"G"}
+    out = _linkify(src, ctx, {"vertexCount": "TemporalGraph.vertexCount"})
+    assert '<a class="proj" href="#d-TemporalGraph_46vertexCount">vertexCount</a>' in out
 
 
 def test_document_without_contents_has_no_sidebar_grid(tmp_path: Path) -> None:
@@ -414,3 +429,47 @@ def test_let_bound_statement_survives_the_proof_cut(tmp_path: Path) -> None:
     assert snippet.endswith("t.size = h")
     assert "let t := tree n" in snippet and "have h : Nat := n" in snippet
     assert "proof n" not in snippet and not truncated
+
+
+def test_match_bound_variable_is_not_linked_to_an_unrelated_field(tmp_path: Path) -> None:
+    src = "def branch (S : Sys) := match select S with | some z => use z | none => []\n"
+    (tmp_path / "Fixture.lean").write_text(src)
+    target = "SpinSystem.TwinSite"
+    data = {"project": [
+        {"name": "Fixture.branch", "module": "Fixture", "kind": "def", "startLine": 1, "endLine": 1},
+        {"name": target},
+    ], "mathlib": [], "fieldOf": {f"{target}.z": target}}
+    ilean = tmp_path / ".lake/build/lib/lean/Fixture.ilean"
+    ilean.parent.mkdir(parents=True)
+    ilean.write_text(json.dumps({"version": 5, "module": "Fixture", "references": {
+        json.dumps({"c": {"m": "Fixture", "n": "Fixture.branch"}}): {
+            "definition": [0, 4, 0, 10], "usages": []},
+    }}))
+    config_path = tmp_path / "review-cone.toml"
+    config_path.write_text('[[section]]\ntitle="Results"\ndecls=["Fixture.branch"]\n')
+    out = R.render(data, tmp_path, None, None, C.load_config(config_path), True, "../")
+    assert '>z</a>' not in out
+    assert 'some z =&gt; use z' in out
+
+
+def test_semantic_links_keep_offsets_after_docstrings_and_proof_removal(tmp_path: Path) -> None:
+    src = ('open Classical in\n/-- Description with 😀. -/\n'
+           'theorem result : dependency = dependency := by rfl\n')
+    (tmp_path / "Fixture.lean").write_text(src)
+    ilean = tmp_path / ".lake/build/lib/lean/Fixture.ilean"
+    ilean.parent.mkdir(parents=True)
+    ilean.write_text(json.dumps({"version": 5, "module": "Fixture", "references": {
+        json.dumps({"c": {"m": "Fixture", "n": "Fixture.dependency"}}): {
+            "definition": None, "usages": [[2, 17, 2, 27], [2, 30, 2, 40]]},
+    }}))
+    cfg = tmp_path / "review-cone.toml"
+    cfg.write_text('[[section]]\ntitle="Results"\ndecls=["Fixture.result"]\n')
+    data = {"project": [
+        {"name": "Fixture.result", "module": "Fixture", "kind": "theorem", "startLine": 2, "endLine": 3},
+        {"name": "Fixture.dependency"},
+    ], "mathlib": []}
+    out = R.render(data, tmp_path, None, None, C.load_config(cfg), True, "../")
+    assert out.count('href="#d-Fixture_46dependency">dependency</a>') == 2
+    assert 'Description with 😀.' in out
+    assert 'by rfl' not in out
+    assert 'open Classical in' in out
