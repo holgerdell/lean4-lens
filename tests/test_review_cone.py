@@ -407,6 +407,19 @@ def test_interface_axiom_metadata_does_not_expose_theorem_proof(tmp_path: Path) 
     assert "exact h" not in snippet and not truncated
 
 
+def test_interface_axiom_metadata_does_not_expose_lemma_proof(tmp_path: Path) -> None:
+    (tmp_path / "Fixture.lean").write_text(
+        "/-- A lemma, despite the interface metadata. -/\n"
+        "lemma result (h : True := by trivial) : True := by\n  exact h\n"
+    )
+    decl = ConeDecl.from_json({
+        "name": "Fixture.result", "module": "Fixture", "kind": "axiom", "startLine": 1, "endLine": 3,
+    })
+    snippet, truncated = R.read_snippet(tmp_path, decl)
+    assert snippet.endswith("lemma result (h : True := by trivial) : True")
+    assert "exact h" not in snippet and not truncated
+
+
 def test_let_bound_statement_survives_the_proof_cut(tmp_path: Path) -> None:
     (tmp_path / "Fixture.lean").write_text(
         "/-- A statement that names its tree. -/\n"

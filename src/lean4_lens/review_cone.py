@@ -527,18 +527,18 @@ def read_snippet(
         print(f"warning: stale line range for {name} in {module}; snippet omitted (re-run review_cone)")
         return "", False
     truncated = False
-    # For theorems, the statement ends at the proof-introducing `:=` — drop the
+    # For theorems and lemmas, the statement ends at the proof-introducing `:=` — drop the
     # proof body, whether a tactic block (`:= by ...`) or a term (`:= fun …`).
     # That `:=` is the one at bracket depth 0: a `:=` inside binders (autoparams
     # `(h : P := by …)`), a set-builder `{u | let x := …}`, or a comment/string
     # belongs to the statement, not the proof, and must not truncate it.
-    # Some cached module-interface exports classify theorem constants as axioms.
+    # Some cached module-interface exports classify theorem and lemma constants as axioms.
     # The source keyword still identifies which value is a proof, not a definition.
-    source_theorem = re.search(
-        r"^\s*(?:(?:private|protected|noncomputable)\s+)*theorem\b",
+    source_proof_decl = re.search(
+        r"^\s*(?:(?:private|protected|noncomputable)\s+)*(?:theorem|lemma)\b",
         blank_comments_and_strings("\n".join(block)), re.M,
     )
-    if d.kind == "theorem" or (d.kind == "axiom" and source_theorem):
+    if d.kind == "theorem" or (d.kind == "axiom" and source_proof_decl):
         cut = _statement_value_split(block)
         if cut is not None:
             c_idx, c_col = cut
@@ -917,7 +917,7 @@ def render(
 
     tcinfo = toolchain_info(lean_root)
     foot_bits = tcinfo.split(", ") if tcinfo else []
-    foot_bits.append("checked by <code>#print axioms</code> on the full build")
+    foot_bits.append("axiom audit of imported compiled modules (<code>#print axioms</code>)")
     footer = " · ".join(html.escape(b) if "<" not in b else b for b in foot_bits)
 
     panel_tail = f"<div class='vpanel-foot'>{footer}</div>{HUMAN_REVIEW_NOTE}</div></section>"
