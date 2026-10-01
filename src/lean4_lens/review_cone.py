@@ -18,8 +18,7 @@ overrides) is the sole control surface. It lists an ordered set of `[[section]]`
 blocks, each with a `title` and a `decls` list of Lean names. EVERY named decl is
 a *root*: the cone is the transitive closure of them all, and named decls render
 in their section in the order written. Every other cone member falls into the
-implicit `[support]` catch-all (rendered last, topologically sorted, listed in
-the sidebar contents unless `support.toc = false`; --toc-support forces it on).
+implicit `[support]` catch-all (rendered last, topologically sorted).
 Optional display titles and prose summaries live in section-local
 `[section.titles]` / `[section.summaries]` tables; the document's
 own `title`, `description` (prose leading the page, in the same markdown subset)
@@ -32,7 +31,7 @@ Usage:
     lean4-lens review-cone --project path/to/proj   # a specific project
     lean4-lens review-cone --config path/to.toml    # a specific config
     lean4-lens review-cone --json cone.json         # render an existing JSON, skip the Lean run
-    lean4-lens review-cone --toc-support --out out.html --title "My Formalization"
+    lean4-lens review-cone --out out.html --title "My Formalization"
 
 `lean4-lens emit-refs` shares this file's Lean emitter to write `dep-graph.json`
 for `lean4-lens refs` — data, not a document.
@@ -678,9 +677,6 @@ h1 { font: 400 30px/1.25 var(--font-heading); margin: 8px 0 12px; }
 .about p { max-width: 85ch; }
 .verification > summary { color: var(--accent); }
 .prov { color: var(--muted); font-size: 12px; }
-.contents { display: flex; flex-wrap: wrap; gap: 12px 26px; padding: 14px 0 26px; }
-.contents a { font-size: 13px; text-decoration: none; }
-.contents a:hover { text-decoration: underline; }
 .review-section { background: var(--section-bg); }
 .review-section + .review-section { margin-top: 80px; }
 .section-heading { padding: 28px 24px 22px; scroll-margin-top: 16px; }
@@ -751,7 +747,7 @@ code.ax { margin-right: 8px; }
 }
 @media print {
   body { padding: 0; max-width: none; }
-  .contents, .about, .usedby { display: none; }
+  .about, .usedby { display: none; }
   .review-section { background: none; }
   .entry-heading { break-after: avoid; }
 }
@@ -770,7 +766,6 @@ def render(
     title_override: str | None,
     package: str | None,
     config: ReviewConeConfig,
-    show_support_toc: bool,
     src_prefix: str = "",
 ) -> str:
     """`src_prefix` is the path from the output document's directory to
@@ -862,7 +857,7 @@ def render(
     # and skipped. Every unplaced cone member falls into the support catch-all,
     # topologically sorted (dependencies first, so it reads with no forward refs).
     placed: set[str] = set()
-    section_entries: list[tuple[str, bool, list[ConeDecl]]] = []
+    section_entries: list[tuple[str, list[ConeDecl]]] = []
     for sec in config["sections"]:
         entries: list[ConeDecl] = []
         for name in sec["decls"]:
@@ -876,7 +871,7 @@ def render(
             if name not in placed:
                 placed.add(name)
                 entries.append(entry)
-        section_entries.append((sec["title"], sec["toc"], entries))
+        section_entries.append((sec["title"], entries))
     support = topo_sort([d for d in project if d.name not in placed], key=lambda d: d.name.lower())
     support_title = config["support"]["title"]
 
@@ -958,14 +953,10 @@ def render(
             f" · Verification details</summary>{panel}</details>"
         )
 
-    def toc_label(d: ConeDecl) -> str:
-        parts = [p for p in (label_map.get(d.name), title_map.get(d.name) or d.name) if p]
-        return html.escape(" — ".join(parts))
-
     ptitle = title_override or (f"the {package}" if package else "this Lean project")
     title = "Lean 4 formalization of " + ptitle
-    named_titles = [t for t, _, entries in section_entries if entries]  # headings that actually render, in order
-    n_headline = sum(len(entries) for _, _, entries in section_entries)
+    named_titles = [t for t, entries in section_entries if entries]  # headings that actually render, in order
+    n_headline = sum(len(entries) for _, entries in section_entries)
     # With nothing left over, the sentence just ends after the sections.
     support_prose = (
         f"; the {spell(len(support))} remaining <em>{html.escape(support_title.lower())}</em> "
@@ -1028,16 +1019,6 @@ def render(
 
     parts.append("</header>")
 
-    # Compact top navigation: primary declarations plus a support-section link.
-    nav: list[str] = []
-    for _, in_toc, entries in section_entries:
-        if in_toc:
-            nav.extend(f"<a href='#{anchor_id(d.name)}'>{toc_label(d)}</a>" for d in entries)
-    if support and show_support_toc:
-        nav.append(f"<a href='#support'>{html.escape(support_title)} ({len(support)})</a>")
-    if nav:
-        parts.append("<nav class='contents' aria-label='Contents'>" + "".join(nav) + "</nav>")
-
     def section_html(section_id: str, heading: str, entries: list[ConeDecl], note: str) -> str:
         count = len(entries)
         noun = "theorem" if all(d.kind == "theorem" for d in entries) else "declaration"
@@ -1052,7 +1033,7 @@ def render(
         )
 
     parts.append("<main>")
-    for i, (sec_title, _, entries) in enumerate(section_entries):
+    for i, (sec_title, entries) in enumerate(section_entries):
         if entries:
             parts.append(section_html(f"section-{i}", sec_title, entries, "Statements and their Lean declarations."))
     if support:
@@ -1092,11 +1073,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=None,
         help=f"Layout config (default: <project>/{DEFAULT_CONFIG_NAME}). Lists the roots and sections.",
-    )
-    ap.add_argument(
-        "--toc-support",
-        action="store_true",
-        help="List the supporting declarations in the contents even if the config sets support.toc = false.",
     )
     args = ap.parse_args(argv)
 
@@ -1169,7 +1145,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         lean_root = (json_path.resolve().parent / data.get("projectRoot", ".")).resolve()
 
     package = read_package_name(project_root) if project_root is not None else None
-    show_support_toc = config["support"]["toc"] or args.toc_support
 
     # Output: --out beats the config's `out` (resolved against the project
     # root) beats the default name.
@@ -1177,7 +1152,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     out_path = args.out or (doc_root / config["out"] if config["out"] else doc_root / f"{config_path.stem}.html")
     src_prefix = os.path.relpath(lean_root.resolve(), out_path.resolve().parent).replace(os.sep, "/")
     src_prefix = "" if src_prefix == "." else src_prefix + "/"
-    html_str = render(data, lean_root, args.title or config["title"], package, config, show_support_toc, src_prefix)
+    html_str = render(data, lean_root, args.title or config["title"], package, config, src_prefix)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html_str, encoding="utf-8")
 

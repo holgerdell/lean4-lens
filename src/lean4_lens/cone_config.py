@@ -27,12 +27,10 @@ class SectionConfig(TypedDict):
     titles: dict[str, str]
     labels: dict[str, str]
     summaries: dict[str, str]
-    toc: bool
 
 
 class SupportConfig(TypedDict):
     title: str
-    toc: bool
 
 
 class InfoConfig(TypedDict):
@@ -108,8 +106,8 @@ def _read_info(raw: dict[str, object]) -> InfoConfig | None:
 def load_config(path: Path) -> ReviewConeConfig:
     """Parse and validate `review-cone.toml`. Returns
         {"sections": [{"title": str, "decls": [name], "titles": {name: str},
-          "labels": {name: str}, "summaries": {name: str}, "toc": bool}],
-         "support": {"title": str, "toc": bool},
+          "labels": {name: str}, "summaries": {name: str}}],
+         "support": {"title": str},
          "info": {"heading": str, "text": str, "url": str} | None,
          "roots": [name],          # union of all section decls, order-preserving
          "title": str | None,      # document title (CLI --title overrides)
@@ -117,8 +115,7 @@ def load_config(path: Path) -> ReviewConeConfig:
          "out": str | None}        # output path, relative to the project root
     Every named decl is a root. Enforced invariants (each a hard error):
       * each `[[section]]` has a non-empty string `title` and a `decls` list of
-        strings, and an optional `toc` flag (default true) that lists it in the
-        table of contents;
+        strings;
       * no decl appears in two sections;
       * every `[section.titles]`, `[section.labels]` and `[section.summaries]`
         key is one of that section's decls, with a string value (a value that parsed to a dict
@@ -167,7 +164,6 @@ def load_config(path: Path) -> ReviewConeConfig:
                 "titles": titles,
                 "labels": labels,
                 "summaries": summaries,
-                "toc": bool(sec.get("toc", True)),
             }
         )
 
@@ -176,7 +172,6 @@ def load_config(path: Path) -> ReviewConeConfig:
         raise ConfigError("`[support]` must be a table")
     support: SupportConfig = {
         "title": sup.get("title", "Supporting declarations"),
-        "toc": bool(sup.get("toc", True)),
     }
     if not isinstance(support["title"], str) or not support["title"].strip():
         raise ConfigError("`support.title` must be a non-empty string")

@@ -9,4 +9,3 @@ decls = ["Fixture.sum_le", "Fixture.double_sum_pos"]
 
 [support]
 title = "Supporting declarations"
-toc = true

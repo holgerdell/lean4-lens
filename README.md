@@ -67,8 +67,6 @@ read before what it depends on:
 The elaborator run needs `lake` on PATH and reads the oleans as they are — build
 the project yourself first. Options: `--json FILE` re-renders JSON emitted
 earlier and skips the Lean run entirely, `--config`, `--out` and `--title` override the config,
-`--toc-support` lists the supporting declarations in the contents even when
-the config hides them,
 and `--lean-root` points the source snippets at a different tree.
 
 ### Configuring the document
@@ -97,7 +95,6 @@ decls = ["main_theorem", "algorithm_correct"]
 
 [support]
 title = "Supporting declarations"
-toc = false
 
 [info]
 heading = "Full source code"
@@ -135,12 +132,11 @@ give code, `*emphasis*` and `**strong**` work, and `$…$` / `$$…$$` hold TeX,
 which KaTeX renders from its CDN (the raw TeX stays readable offline; the
 KaTeX tags are only emitted when some prose contains math). Everything is
 escaped first; raw HTML is never interpreted.
-`toc = false` keeps the section's declarations out of the compact top navigation. A dotted Lean name must be
+A dotted Lean name must be
 quoted, or TOML reads it as a nested table.
 
 Cone members no section claims land in the `[support]` catch-all: rendered
-last in topological order, with a section link in the top navigation unless
-`support.toc = false` (`--toc-support` overrides that).
+last in topological order.
 
 Successful verification is summarized once, with axiom and version details
 available in a disclosure. Declarations with extra axioms or `sorry` still have

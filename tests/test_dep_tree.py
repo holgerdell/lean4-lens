@@ -1360,7 +1360,7 @@ class _EmitterTests(_MixinBase):
         self.assertIn("Fixture.sound", decls)
         config_path = Path(self.tmp.name) / "proof-argument-cone.toml"
         config_path.write_text('[[section]]\ntitle = "Algorithm"\ndecls = ["Fixture.algorithm"]\n')
-        html = R.render(data, self.project, None, None, C.load_config(config_path), True, "../")
+        html = R.render(data, self.project, None, None, C.load_config(config_path), "../")
         anchor = R.anchor_id("Fixture.sound")
         self.assertIn(f"id='{anchor}'", html)
         self.assertIn(f'href="#{anchor}">sound</a>', html)

@@ -197,9 +197,10 @@ def test_universe_annotated_name_is_linked() -> None:
     assert '<a class="proj" href="#d-TemporalGraph">TemporalGraph</a>.{0}' in out
 
 
-def test_document_has_top_navigation(tmp_path: Path) -> None:
+def test_document_has_no_top_navigation(tmp_path: Path) -> None:
     html = _render_fixture(tmp_path, 'title = "Fixture"\n', n_decls=2)
-    assert "<nav class='contents' aria-label='Contents'>" in html
+    assert "<nav" not in html
+    assert ".contents" not in html
     assert "<meta name='viewport'" in html and "<html lang='en'>" in html
     assert "kernel-checked" in html and "requires human review" in html
     assert "href='#'" not in html
@@ -234,8 +235,9 @@ def test_type_ascription_is_not_mistaken_for_a_binder() -> None:
     assert '<a class="proj" href="#d-TemporalGraph_46vertexCount">vertexCount</a>' in out
 
 
-def test_document_without_contents_has_no_sidebar_grid(tmp_path: Path) -> None:
-    html = _render_fixture(tmp_path, 'title = "Fixture"\n[support]\ntoc = false\n')
+@pytest.mark.parametrize("flag", ["true", "false"])
+def test_legacy_toc_flags_cannot_enable_navigation(tmp_path: Path, flag: str) -> None:
+    html = _render_fixture(tmp_path, f'title = "Fixture"\n[support]\ntoc = {flag}\n', n_decls=2)
     assert "class='layout'" not in html and "<nav" not in html and "<main>" in html
 
 
@@ -361,7 +363,7 @@ def test_katex_included_only_when_prose_has_math(tmp_path: Path) -> None:
     def render(name: str, line: int) -> str:
         decl = {'name': f'Fixture.{name}', 'module': 'Fixture', 'kind': 'def',
                 'startLine': line, 'endLine': line + 1, 'status': 'verified', 'axioms': []}
-        return R.render({'project': [decl], 'mathlib': []}, tmp_path, None, None, config, True, '../')
+        return R.render({'project': [decl], 'mathlib': []}, tmp_path, None, None, config, '../')
 
     assert R.KATEX_HEAD not in render('a', 1)
     math = render('b', 3)
@@ -380,7 +382,7 @@ def test_comparison_keeps_long_definitions_and_warnings_visible(tmp_path: Path) 
     }
     result = R.render(
         {'project': [decl], 'mathlib': []}, tmp_path, None, None,
-        C.load_config(config_path), True, '../',
+        C.load_config(config_path), '../',
     )
     code = re.search(r'<pre[^>]*><code>(.*?)</code></pre>', result, re.S)
     assert code is not None
@@ -460,7 +462,7 @@ def test_match_bound_variable_is_not_linked_to_an_unrelated_field(tmp_path: Path
     }}))
     config_path = tmp_path / "review-cone.toml"
     config_path.write_text('[[section]]\ntitle="Results"\ndecls=["Fixture.branch"]\n')
-    out = R.render(data, tmp_path, None, None, C.load_config(config_path), True, "../")
+    out = R.render(data, tmp_path, None, None, C.load_config(config_path), "../")
     assert '>z</a>' not in out
     assert 'some z =&gt; use z' in out
 
@@ -481,8 +483,14 @@ def test_semantic_links_keep_offsets_after_docstrings_and_proof_removal(tmp_path
         {"name": "Fixture.result", "module": "Fixture", "kind": "theorem", "startLine": 2, "endLine": 3},
         {"name": "Fixture.dependency"},
     ], "mathlib": []}
-    out = R.render(data, tmp_path, None, None, C.load_config(cfg), True, "../")
+    out = R.render(data, tmp_path, None, None, C.load_config(cfg), "../")
     assert out.count('href="#d-Fixture_46dependency">dependency</a>') == 2
     assert 'Description with 😀.' in out
     assert 'by rfl' not in out
     assert 'open Classical in' in out
+
+
+def test_removed_toc_cli_option_is_rejected() -> None:
+    with pytest.raises(SystemExit) as exc:
+        R.main(["--toc-support"])
+    assert exc.value.code == 2
