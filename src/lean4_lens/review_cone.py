@@ -154,6 +154,19 @@ def emitter_source(root: Path, *, deps: bool) -> str:
     if module_emitter_supported(root):
         source = source.replace("-- MODULE_HEADER", "module", 1)
         source = source.replace("unsafe def main :", "public unsafe def main :", 1)
+        source = source.replace("-- IMPORT_ARTIFACTS_PARAM", "(arts : Lean.NameMap Lean.ImportArtifacts := {})", 1)
+        source = source.replace("-- IMPORT_ARTIFACTS_ARG", "(arts := arts)", 1)
+        source = source.replace("-- IMPORT_ARTIFACTS_RECURSE", "arts")
+        source = source.replace("-- IMPORT_ARTIFACTS_ROOT", "false arts", 1)
+        source = source.replace(
+            "-- IMPORT_ARTIFACTS_SETUP",
+            """let arts ← match ← IO.getEnv "LEAN4_LENS_IMPORT_SETUP" with
+  | none => pure ({} : Lean.NameMap Lean.ImportArtifacts)
+  | some path => do
+      let json ← IO.ofExcept <| Lean.Json.parse (← IO.FS.readFile path)
+      let setup : Lean.ModuleSetup ← IO.ofExcept <| Lean.fromJson? json
+      pure setup.importArts""", 1,
+        )
         if not deps:
             source = source.replace("-- IMPORT_LEVEL", "(level := if privateOnly then .private else .server)", 1)
     return source

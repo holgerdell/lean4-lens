@@ -187,6 +187,11 @@ These commands never modify your Lean sources, but they are not read-only:
 `dead_candidates.jsonl` into the current directory. Every output path is
 overridable.
 
+On Lean 4.32 and later, `LEAN4_LENS_IMPORT_SETUP` can name a standard Lean
+module-setup JSON file. Its `importArts` map selects the artifacts used by the
+review and dependency emitters. This supports public-only precompiled imports;
+all other modules use the normal import selection.
+
 ### emit-refs
 
 Runs the same Lean emitter as `review-cone`, but over every project

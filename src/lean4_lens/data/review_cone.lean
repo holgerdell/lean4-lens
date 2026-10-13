@@ -578,7 +578,8 @@ one-file-at-a-time build never hits this). Recover by pruning the offender and
 everything that (transitively, per `directImports`) reaches it, then retrying
 — capped by `fuel` so an unrelated import failure still surfaces as an error
 instead of looping. -/
-unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : Nat) (privateOnly : Bool := false) :
+unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : Nat) (privateOnly : Bool := false) -- IMPORT_ARTIFACTS_PARAM
+    :
     IO (Environment × Array Name) := do
   try
     -- a failed `importModules (loadExts := true)` clears the "initializers
@@ -586,6 +587,7 @@ unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : N
     enableInitializersExecution
     let env ← importModules (mods.map (fun m => { module := m })) {}
       (trustLevel := 0) (loadExts := true) -- IMPORT_LEVEL
+      -- IMPORT_ARTIFACTS_ARG
     return (env, mods)
   catch e =>
     if fuel == 0 then throw e
@@ -593,7 +595,7 @@ unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : N
     -- with full data; other errors must still surface through normal handling.
     if !privateOnly && (toString e).startsWith "cannot import non-`module` " then
       progress "legacy entry module detected; retrying with private module data …"
-      return ← pruneAndImport root mods (fuel - 1) true
+      return ← pruneAndImport root mods (fuel - 1) true -- IMPORT_ARTIFACTS_RECURSE
     -- TOOLCHAIN-COUPLED: no API reports which module clashed, so the offender
     -- is parsed out of core's "import <M> failed, environment already
     -- contains <decl>" message; a rewording downgrades this to a hard error.
@@ -614,7 +616,7 @@ unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : N
       for m in mods do
         if banned.contains m then
           IO.eprintln s!"review_cone: skipping {m} — clashes with an already-imported module on a duplicate private declaration"
-      pruneAndImport root kept (fuel - 1) privateOnly
+      pruneAndImport root kept (fuel - 1) privateOnly -- IMPORT_ARTIFACTS_RECURSE
     | _ => throw e
 
 unsafe def run : IO Unit := do
@@ -662,7 +664,8 @@ unsafe def run : IO Unit := do
   enableInitializersExecution
   let importStart ← IO.monoMsNow
   progress s!"importing {mods.size} modules …"
-  let (env, prunedMods) ← pruneAndImport root mods 20
+  -- IMPORT_ARTIFACTS_SETUP
+  let (env, prunedMods) ← pruneAndImport root mods 20 -- IMPORT_ARTIFACTS_ROOT
   progress s!"import complete ({(← IO.monoMsNow) - importStart} ms)"
   -- every config root must resolve to a project declaration; a typo fails here
   let bad := rootNames.filter fun n =>
