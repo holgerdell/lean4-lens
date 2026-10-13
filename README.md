@@ -190,7 +190,8 @@ overridable.
 On Lean 4.32 and later, `LEAN4_LENS_IMPORT_SETUP` can name a standard Lean
 module-setup JSON file. Its `importArts` map selects the artifacts used by the
 review and dependency emitters. This supports public-only precompiled imports;
-all other modules use the normal import selection.
+dependency export loads the full proof imports of other modules and checks that
+the selected public-only imports do not request private data.
 
 ### emit-refs
 

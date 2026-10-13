@@ -168,6 +168,54 @@ def emitter_source(root: Path, *, deps: bool) -> str:
       pure setup.importArts""", 1,
         )
         if deps:
+            source = source.replace("import Lean", "import Lean\nimport all Lean.Environment", 1)
+            helper = """unsafe def importProofData (mods : Array Name) (arts : NameMap ImportArtifacts)
+    : IO Environment := withImporting do
+  let isPartial := fun (n : Name) => match arts.find? n with
+    | some a => a.oleanPrivate?.isNone
+    | none => false
+  let imports := mods.map fun n => { module := n, importAll := !isPartial n : Import }
+  let (_, initial) ← (importModulesCore imports .server arts).run
+  let mut state := initial
+  let mut requested : NameSet := {}
+  let mut allImports := imports
+  repeat
+    let mut pending : Array Import := #[]
+    for n in state.moduleNames do
+      if isPartial n then continue
+      if !requested.contains n then
+        requested := requested.insert n
+        pending := pending.push { module := n, importAll := true }
+      let some mod := state.moduleNameMap[n]?
+        | throw <| IO.userError s!"Missing discovered module: {n}"
+      if let some (data, _) := mod.parts[0]? then
+        for imp in data.imports do
+          if !isPartial imp.module && !requested.contains imp.module then
+            requested := requested.insert imp.module
+            pending := pending.push { module := imp.module, importAll := true }
+    if pending.isEmpty then break
+    allImports := allImports ++ pending
+    let (_, next) ← (importModulesCore pending .server arts).run state
+    state := next
+  for n in state.moduleNames do
+    let some mod := state.moduleNameMap[n]?
+      | throw <| IO.userError s!"Missing completed module: {n}"
+    if isPartial n then
+      if mod.importAll then
+        throw <| IO.userError s!"Partial artifact requested private data: {n}"
+    else if !mod.hasData || !mod.importAll then
+      throw <| IO.userError s!"Incomplete private proof import: {n}"
+  finalizeImport state allImports {} (leakEnv := false) (loadExts := true) (level := .server)
+
+"""
+            source = source.replace("unsafe def pruneAndImport", helper + "unsafe def pruneAndImport", 1)
+            source = source.replace(
+                "let env ← importModules (mods.map (fun m => { module := m -- IMPORT_PRIVATE_FLAG\n"
+                "      })) {}\n      (trustLevel := 0) (loadExts := true) -- IMPORT_LEVEL\n      (arts := arts)",
+                "let env ← if !arts.isEmpty then importProofData mods arts else\n"
+                "      importModules (mods.map (fun m => { module := m, importAll := true })) {}\n"
+                "        (trustLevel := 0) (loadExts := true) (level := .private) (arts := arts)", 1,
+            )
             source = source.replace("-- IMPORT_PRIVATE_FLAG", ", importAll := true", 1)
             source = source.replace(
                 "-- IMPORT_LEVEL", "(level := if !arts.isEmpty then .server else .private)", 1,

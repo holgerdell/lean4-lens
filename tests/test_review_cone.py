@@ -256,6 +256,9 @@ def test_emitter_keeps_legacy_support_and_private_dependency_mode(tmp_path: Path
     assert ('IO.getEnv "LEAN4_LENS_IMPORT_SETUP"' in cone) == modern
     assert ('IO.getEnv "LEAN4_LENS_IMPORT_SETUP"' in deps) == modern
     assert ("(arts := arts)" in cone) == modern
+    assert ("import all Lean.Environment" in deps) == modern
+    assert ("Incomplete private proof import" in deps) == modern
+    assert "importProofData" not in cone
 
 
 def test_custom_or_overridden_toolchain_is_conservative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
