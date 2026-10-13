@@ -585,7 +585,8 @@ unsafe def pruneAndImport (root : System.FilePath) (mods : Array Name) (fuel : N
     -- a failed `importModules (loadExts := true)` clears the "initializers
     -- enabled" flag it needs, so a retry must re-arm it first.
     enableInitializersExecution
-    let env ← importModules (mods.map (fun m => { module := m })) {}
+    let env ← importModules (mods.map (fun m => { module := m -- IMPORT_PRIVATE_FLAG
+      })) {}
       (trustLevel := 0) (loadExts := true) -- IMPORT_LEVEL
       -- IMPORT_ARTIFACTS_ARG
     return (env, mods)

@@ -167,7 +167,13 @@ def emitter_source(root: Path, *, deps: bool) -> str:
       let setup : Lean.ModuleSetup ← IO.ofExcept <| Lean.fromJson? json
       pure setup.importArts""", 1,
         )
-        if not deps:
+        if deps:
+            source = source.replace("-- IMPORT_PRIVATE_FLAG", ", importAll := true", 1)
+            source = source.replace(
+                "-- IMPORT_LEVEL", "(level := if !arts.isEmpty then .server else .private)", 1,
+            )
+        else:
+            source = source.replace("-- IMPORT_PRIVATE_FLAG", ", importAll := privateOnly", 1)
             source = source.replace("-- IMPORT_LEVEL", "(level := if privateOnly then .private else .server)", 1)
     return source
 
