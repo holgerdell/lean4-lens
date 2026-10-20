@@ -684,10 +684,15 @@ def linkify(src: str, ctx: LinkCtx, refs: Sequence[SourceRef], offset: int = 0) 
                     f'target="_blank" rel="noopener">{escaped}</a>')
         return escaped
 
-    # Conflicting or overlapping elaborator ranges have no single unambiguous target.
+    # Lean can record both `@name` and `name` for the same constant. Keep the
+    # innermost range when nested references agree; conflicting targets and
+    # crossing ranges still have no single unambiguous interpretation.
     candidates = sorted(set(r for r in refs if offset <= r.start < r.end <= offset + len(src)))
     safe = [r for i, r in enumerate(candidates)
             if not any(other.start < r.end and r.start < other.end
+                       and not (other.name == r.name and other.definition == r.definition
+                                and other.start <= r.start and r.end <= other.end
+                                and (other.start, other.end) != (r.start, r.end))
                        for j, other in enumerate(candidates) if i != j)]
     out = []
     for lo, hi, kind in iter_spans(src):

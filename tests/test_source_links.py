@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -114,3 +116,65 @@ def test_resolved_proof_fields_keep_their_muted_bodies() -> None:
     assert '<span class="proof">  <a' in out
     assert '<span class="proof">    trivial\n</span>' in out
     assert '<span class="proof">  value' not in out
+
+
+def test_explicit_alias_uses_nested_compiler_reference(tmp_path: Path) -> None:
+    source = "noncomputable abbrev countingTree := @LocalAritySchedule.countingTree"
+    target = "Fixture.LocalAritySchedule.countingTree"
+    start = source.index("@")
+    _write_ilean(tmp_path, source, {
+        _ident(target): {"definition": None, "usages": [
+            [0, start, 0, len(source), "Fixture.countingTree"],
+            [0, start + 1, 0, len(source), "Fixture.countingTree"],
+        ]},
+    })
+    out = linkify(source, _ctx(target), read_source_refs(tmp_path, "Fixture", source))
+    assert out == (
+        'noncomputable abbrev countingTree := @'
+        '<a class="proj" href="#d-Fixture_46LocalAritySchedule_46countingTree">'
+        'LocalAritySchedule.countingTree</a>'
+    )
+
+
+@pytest.mark.parametrize("other", [
+    SourceRef(0, 5, "Other.target"),  # Nested, but a different target.
+    SourceRef(0, 3, "Fixture.target"),  # Same target, but crossing ranges.
+])
+def test_overlapping_references_still_reject_conflicts(other: SourceRef) -> None:
+    out = linkify("@name", _ctx("Fixture.target", "Other.target"),
+                  [other, SourceRef(1, 5, "Fixture.target")])
+    assert out == "@name"
+
+
+@pytest.mark.parametrize("version", ["v4.30.0", "v4.34.1"])
+def test_explicit_alias_links_from_lake_output(tmp_path: Path, version: str) -> None:
+    """Exercise actual elaborator ranges without downloading Lean toolchains."""
+    if shutil.which("elan") is None or shutil.which("lake") is None:
+        pytest.skip("Lean tooling is not installed")
+    toolchain = f"leanprover/lean4:{version}"
+    installed = subprocess.run(["elan", "toolchain", "list"], capture_output=True, text=True, check=True)
+    if toolchain not in {line.split()[0] for line in installed.stdout.splitlines() if line.strip()}:
+        pytest.skip(f"{toolchain} is not installed")
+    (tmp_path / "lean-toolchain").write_text(toolchain + "\n")
+    (tmp_path / "lakefile.toml").write_text(
+        'name = "alias_fixture"\ndefaultTargets = ["Fixture"]\n[[lean_lib]]\nname = "Fixture"\n'
+    )
+    source = (
+        "namespace Fixture\n"
+        "noncomputable def LocalAritySchedule.countingTree {α : Type} (x : α) : α := x\n"
+        "noncomputable abbrev countingTree := @LocalAritySchedule.countingTree\n"
+        "end Fixture\n"
+    )
+    (tmp_path / "Fixture.lean").write_text(source)
+    # Do not let the caller's toolchain override the version under test.
+    env = {key: value for key, value in os.environ.items() if key != "ELAN_TOOLCHAIN"}
+    subprocess.run(["lake", "build"], cwd=tmp_path, env=env, capture_output=True, text=True, check=True)
+    refs = read_source_refs(tmp_path, "Fixture", source)
+    target = "Fixture.LocalAritySchedule.countingTree"
+    alias_start = source.index("noncomputable abbrev")
+    alias = source[alias_start:source.index("\n", alias_start)]
+    out = linkify(alias, _ctx(target), refs, alias_start)
+    assert out.endswith(
+        '@<a class="proj" href="#d-Fixture_46LocalAritySchedule_46countingTree">'
+        'LocalAritySchedule.countingTree</a>'
+    )
